@@ -40,6 +40,7 @@ import {
   Unplug,
   Wifi,
   WifiOff,
+  Home,
 } from "lucide-react";
 
 import {
@@ -1146,7 +1147,7 @@ function IKPage() {
   const [sending, setSending] = useState(false);
   const [sendStatus, setSendStatus] = useState<string | null>(null);
   const [livePositions, setLivePositions] = useState<Record<string, number> | null>(null);
-  const [robotSpeed, setRobotSpeed] = useState(100); // 0-1000 (default 100 = slow & safe)
+  const [robotSpeed, setRobotSpeed] = useState(10); // 1-100 (default 10 = slow & safe)
 
   // Check robot connection on mount & poll status
   useEffect(() => {
@@ -1365,8 +1366,8 @@ function IKPage() {
                 <span className="text-[10px] font-medium text-gray-500 whitespace-nowrap">Speed</span>
                 <input
                   type="range"
-                  min={0}
-                  max={1000}
+                  min={1}
+                  max={100}
                   value={robotSpeed}
                   onChange={e => {
                     const v = Number(e.target.value);
@@ -1377,6 +1378,21 @@ function IKPage() {
                 />
                 <span className="text-[10px] font-mono text-gray-600 w-7 text-right">{robotSpeed}</span>
               </div>
+              <button
+                onClick={async () => {
+                  setSending(true); setSendStatus(null); setError(null);
+                  try {
+                    const res = await motorMove([3, -26, -7, 92, -65, 39], robotSpeed);
+                    setSendStatus(`Home: moved ${res.motors_moved.length} motors`);
+                    setJoints([3, -26, -7, 92, -65, 39]);
+                  } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Home failed'); }
+                  finally { setSending(false); }
+                }}
+                disabled={sending}
+                className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-1.5"
+              >
+                <Home size={12} /> Home
+              </button>
               <button
                 onClick={handleSendToRobot}
                 disabled={sending}

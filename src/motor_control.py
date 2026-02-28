@@ -151,15 +151,15 @@ class SO100MotorController:
         """Set the movement speed for all motors.
 
         Args:
-            speed: 0-1000 percentage-like scale.
-                   0 = slowest (Goal_Velocity=50),
-                   100 = moderate (Goal_Velocity=300),
-                   1000 = maximum (Goal_Velocity=4095).
+            speed: 1-100 percentage scale.
+                   1 = slowest (Goal_Velocity=50),
+                   50 = moderate (Goal_Velocity=~2070),
+                   100 = maximum (Goal_Velocity=4095).
                    The raw Goal_Velocity register value is stored.
         """
         # Clamp and convert to raw Goal_Velocity (50–4095)
-        speed = max(0, min(1000, speed))
-        raw = int(50 + (speed / 1000) * (4095 - 50))
+        speed = max(1, min(100, speed))
+        raw = int(50 + ((speed - 1) / 99) * (4095 - 50))
         self._speed = raw
         with self._lock:
             if self.is_connected:
@@ -168,7 +168,7 @@ class SO100MotorController:
                         self._bus.write("Goal_Velocity", motor, raw)
                 except Exception as e:
                     logger.warning(f"Failed to set speed: {e}")
-        logger.info(f"Speed set to {speed}/1000 (raw Goal_Velocity={raw})")
+        logger.info(f"Speed set to {speed}/100 (raw Goal_Velocity={raw})")
         return {"status": "ok", "speed": speed, "raw_velocity": raw}
 
     def write_positions(self, positions_deg: dict[str, float]) -> dict:
@@ -210,7 +210,7 @@ class SO100MotorController:
 
         Args:
             joints_deg: 6 joint angles in degrees.
-            speed: Optional speed 0-1000. If provided, updates the speed before moving.
+            speed: Optional speed 1-100. If provided, updates the speed before moving.
         """
         if len(joints_deg) != 6:
             return {"error": f"Expected 6 joint values, got {len(joints_deg)}"}
