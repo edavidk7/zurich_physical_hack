@@ -2,6 +2,8 @@
 
 ## Document-to-Execution Pipeline: Turning Factory Knowledge into Machine-Runnable Instructions
 
+**Live Demo: SO-ARM100 robot arm physically draws shapes extracted from documents.**
+
 ---
 
 ## 1. Problem Statement
@@ -82,6 +84,7 @@ Factory Document (PDF / DOCX / Scanned Image / XLSX)
 | **Reasoning Layer** | Google DeepMind (Gemini) | Multi-agent system that extracts logic and compiles executable plans. |
 | **Orchestration** | Python (LangChain / CrewAI) | Coordinates multi-agent workflow from parse to compile to validate. |
 | **Operator Interface** | Web-based HMI (Streamlit / React) | Displays executable workflow with step-by-step guidance, tolerance monitoring, decision branch navigation. |
+| **Robot Hardware** | SO-ARM100 (6-DOF servo arm) | Physically executes compiled task plans. Demo: draws shapes/diagrams extracted from documents. Controlled via Python + serial (lerobot / STS3215 servos). |
 
 ### 3.2 Agent Definitions
 
@@ -91,6 +94,7 @@ Factory Document (PDF / DOCX / Scanned Image / XLSX)
 | **LogicExtractor** | Structured document content | Extracted operational logic | Identifies ordered sequences, conditional branches (if/then decision trees), tolerances and acceptable ranges, constraints and dependencies, safety precautions. |
 | **TaskCompiler** | Extracted operational logic | Executable task plan (JSON/YAML) | Converts extracted logic into a standardized, machine-readable task plan schema. Maps steps to executable actions, thresholds to sensor checks, decisions to branching logic. |
 | **Validator** | Task plan + original document | Validated task plan + confidence report | Cross-references compiled plan against source document. Flags missing information, ambiguous instructions, unresolvable tolerances. Outputs a confidence score per step. |
+| **MotionPlanner** | Task plan with waypoints/paths | Joint-space trajectory for SO-ARM100 | Converts Cartesian waypoints (drawing paths, pick/place targets) into joint-angle sequences using inverse kinematics. Handles workspace limits, collision avoidance, and pen-up/pen-down transitions. |
 
 ### 3.3 Task Plan Schema (Output Format)
 
@@ -152,15 +156,31 @@ Factory Document (PDF / DOCX / Scanned Image / XLSX)
 
 ## 4. Key Use Cases
 
-### Use Case A: Assembly SOP → Robot Task Plan
+### Use Case A (PRIMARY DEMO): Technical Drawing / Diagram → Robot Draws It
+
+A document containing a technical drawing, diagram, flowchart, or shape (e.g., a PDF with an engineering sketch, a floor plan, a company logo) is parsed by Docling. The agent extracts the visual elements — lines, curves, shapes, text labels — and converts them into an ordered sequence of 2D waypoints. The MotionPlanner translates these waypoints into joint-angle trajectories for the SO-ARM100 robot arm, which physically draws the shape on paper with a mounted pen.
+
+**Pipeline:**
+```
+Document with diagram/drawing (PDF)
+    → Docling (layout analysis, image/figure extraction)
+    → Agent: Extract shapes, lines, curves as 2D coordinates
+    → Agent: Optimize drawing order (minimize pen-up travel)
+    → MotionPlanner: IK → joint trajectories for SO-ARM100
+    → SO-ARM100 draws it on paper
+```
+
+**Why this is the strongest demo:** The audience watches a document go in and a robot physically reproduce what's in it. Zero ambiguity about "document-to-physical bridging."
+
+### Use Case B: Assembly SOP → Robot Task Plan
 
 A Standard Operating Procedure PDF describes how to assemble a widget: pick parts, inspect surfaces, apply torque, verify alignment. Docling parses the document — extracting ordered steps from prose, torque specs from tables, tolerances from footnotes. The agent layer compiles these into a robot-executable task plan with pick/place coordinates, torque parameters, and inspection checkpoints.
 
-### Use Case B: Inspection Specification → Sensor Config + Pass/Fail Engine
+### Use Case C: Inspection Specification → Sensor Config + Pass/Fail Engine
 
 A quality inspection document (PDF with measurement tables, tolerance ranges, sampling rules) is parsed by Docling's table extractor. The agent maps each measurement to a sensor channel, defines thresholds, and generates an automated pass/fail decision engine. Output drives the HMI inspection dashboard.
 
-### Use Case C: Maintenance Manual → Guided Troubleshooting Workflow
+### Use Case D: Maintenance Manual → Guided Troubleshooting Workflow
 
 A scanned maintenance manual (messy, multi-column, with diagrams) is processed by Docling's AI-powered layout analysis. The agent extracts the troubleshooting decision tree and presents it as an interactive guided workflow on the operator HMI — "Is the motor humming? → Yes → Check capacitor voltage → Reading below 200V? → Replace capacitor."
 
@@ -170,8 +190,8 @@ A scanned maintenance manual (messy, multi-column, with diagrams) is processed b
 
 | Judging Criteria | How We Address It |
 |-------------------|-------------------|
-| **Working pipeline** | End-to-end: document in → executable plan out → HMI visualization. Fully demo-able. |
-| **Real document-to-physical bridging** | Output is a machine-executable task plan (not a summary or a chatbot response). Task plans drive robot actions, sensor configs, and operator workflows on a real HMI. |
+| **Working pipeline** | End-to-end: document in → executable plan out → robot draws it. Fully demo-able with real hardware. |
+| **Real document-to-physical bridging** | SO-ARM100 robot arm physically draws shapes extracted from documents. Not a simulation — real pen on real paper. Also generates sensor configs and operator workflows. |
 | **Deployment on real HMI** | Web-based operator dashboard shows step-by-step execution, live tolerance monitoring, decision branch navigation. |
 | **Smart use of Docling** | Leverages table extraction (tolerances, specs), layout analysis (multi-column manuals), formula recognition (engineering calculations), MCP Server for agentic RAG querying. |
 | **Handling messy real-world documents** | Designed for scanned PDFs, mixed formats, inconsistent layouts. Validator agent flags and resolves ambiguities rather than silently failing. |
@@ -189,6 +209,9 @@ A scanned maintenance manual (messy, multi-column, with diagrams) is processed b
 | Task Plan Format | **JSON** (standardized schema) |
 | Operator HMI | **Streamlit** or **React** web dashboard |
 | Validation | Custom Validator agent + schema validation |
+| Robot Hardware | **SO-ARM100** (6-DOF, STS3215 servos, serial control) |
+| Robot Control | **Python** (lerobot / custom IK + trajectory planning) |
+| Drawing Pipeline | SVG path extraction → waypoint generation → IK → joint commands |
 
 ---
 
@@ -196,12 +219,13 @@ A scanned maintenance manual (messy, multi-column, with diagrams) is processed b
 
 **Live demo flow (5 minutes):**
 
-1. **Upload** a real factory SOP document (PDF with text, tables, diagrams) into the system.
-2. **Watch** Docling parse it — show the structured output (tables extracted, steps identified, tolerances captured).
-3. **Show** the agent chain reasoning — LogicExtractor identifies sequences and decision points, TaskCompiler generates the plan.
-4. **Display** the compiled task plan JSON — annotated with step-by-step actions, tolerances, and decision branches.
-5. **Launch** the HMI dashboard — walk through the operator workflow: step execution, tolerance checks, pass/fail decisions, branch navigation.
-6. **Demonstrate resilience** — feed in a messy scanned document and show the Validator flagging ambiguities with confidence scores.
+1. **Upload** a document containing a technical drawing or diagram (PDF) into the system.
+2. **Watch** Docling parse it — show extracted figures, shapes, and structured content on screen.
+3. **Show** the agent chain — shape extraction, waypoint generation, drawing order optimization.
+4. **Display** the compiled task plan — 2D waypoints, pen-up/pen-down commands, joint trajectories.
+5. **SO-ARM100 draws it** — the robot arm physically reproduces the drawing on paper with a pen. The audience watches the document come to life.
+6. **HMI overlay** — the operator dashboard shows real-time arm position, progress through the task plan, and step-by-step execution.
+7. **Bonus round** — feed in a second document (e.g., a messy scanned SOP) and show the full pipeline: parsing, logic extraction, task plan compilation, and Validator flagging ambiguities.
 
 ---
 
@@ -215,12 +239,55 @@ A scanned maintenance manual (messy, multi-column, with diagrams) is processed b
 
 | Phase | Deliverable | Time |
 |-------|------------|------|
-| Setup | Docling + MCP Server running locally, DeepMind API connected | Hour 1-2 |
-| Core Pipeline | DocParser + LogicExtractor agents working end-to-end | Hour 3-6 |
-| Compiler | TaskCompiler producing valid JSON task plans | Hour 6-8 |
-| HMI | Operator dashboard rendering and stepping through task plans | Hour 8-10 |
-| Validation | Validator agent + messy document handling | Hour 10-12 |
-| Polish & Demo | End-to-end demo, edge cases, presentation prep | Hour 12-14 |
+| Setup | Docling + MCP Server running locally, DeepMind API connected, SO-ARM100 serial link verified | Hour 1-2 |
+| Core Pipeline | DocParser + LogicExtractor agents working end-to-end | Hour 3-5 |
+| Drawing Pipeline | Document → shape extraction → 2D waypoints → IK → SO-ARM100 draws basic shapes | Hour 5-8 |
+| Task Compiler | TaskCompiler producing valid JSON task plans for general SOPs | Hour 8-9 |
+| HMI | Operator dashboard with real-time arm visualization + task plan stepping | Hour 9-11 |
+| Integration | Full pipeline: document → parse → compile → draw + validate | Hour 11-12 |
+| Polish & Demo | End-to-end demo rehearsal, edge cases, presentation prep | Hour 12-14 |
+
+---
+
+## 10. Hardware Setup
+
+### SO-ARM100 Configuration
+- **Arm:** SO-ARM100 (6-DOF, STS3215 bus servos)
+- **End effector:** Pen holder attachment (pen mounted to gripper)
+- **Drawing surface:** A4 paper on flat surface within arm workspace
+- **Control:** Python serial interface (USB-to-TTL → servo bus)
+- **Workspace:** ~20cm x 20cm drawing area at table height
+
+### Drawing Pipeline Detail
+```
+┌──────────────┐     ┌───────────────┐     ┌──────────────┐
+│  Docling      │     │  DeepMind     │     │  SO-ARM100   │
+│  extracts     │────▶│  Agent        │────▶│  draws it    │
+│  figures/     │     │  converts to  │     │  on paper    │
+│  diagrams     │     │  2D waypoints │     │              │
+└──────────────┘     └───────────────┘     └──────────────┘
+                           │
+                     ┌─────▼─────┐
+                     │   IK      │
+                     │  Solver   │
+                     │  (joint   │
+                     │  angles)  │
+                     └───────────┘
+```
+
+**Waypoint format:**
+```json
+{
+  "drawing_commands": [
+    { "type": "PEN_UP",   "position": [0, 0, 50] },
+    { "type": "MOVE",     "position": [10, 20, 50] },
+    { "type": "PEN_DOWN", "position": [10, 20, 5] },
+    { "type": "LINE",     "from": [10, 20], "to": [50, 80] },
+    { "type": "ARC",      "center": [30, 50], "radius": 15, "start_deg": 0, "end_deg": 180 },
+    { "type": "PEN_UP",   "position": [50, 80, 50] }
+  ]
+}
+```
 
 ---
 
