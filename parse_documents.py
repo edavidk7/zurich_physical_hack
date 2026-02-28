@@ -4,7 +4,7 @@ Test script: parse Arduino datasheets and export structured JSON.
 """
 
 from pathlib import Path
-from src.golden_grippers.parser import DocumentParser
+from src.parser import DocumentParser
 
 
 DATA_DIR = Path(__file__).parent / "data" / "arduino"
