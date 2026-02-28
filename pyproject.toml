@@ -20,4 +20,5 @@ dependencies = [
     "mujoco>=3.5.0; sys_platform != 'win32'",
     "feetech-servo-sdk>=1.0.0",
     "matplotlib>=3.10.8",
+    "pyserial>=3.5",
 ]
