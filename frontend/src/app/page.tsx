@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Settings,
   BookOpen,
@@ -22,13 +22,24 @@ import {
   Code2,
   BarChart3,
   Image,
+  Paperclip,
+  X,
+  Loader2,
+  MessageSquare,
+  Send,
+  Bot,
+  User,
+  Sparkles,
 } from "lucide-react";
 
 import {
   getDocuments,
   uploadDocument,
-  executeTask,
+  executeTaskStream,
   imageUrl,
+  chatWithAgent,
+  executeOnRobot,
+  getDocumentContent,
 } from "@/lib/api";
 
 import type {
@@ -36,6 +47,8 @@ import type {
   ExecuteResult,
   SearchResult,
   Step,
+  ChatMessage,
+  SearchResultEvent,
 } from "@/lib/types";
 
 // ===========================================================================
@@ -43,7 +56,7 @@ import type {
 // ===========================================================================
 
 export default function Home() {
-  const [page, setPage] = useState<"task" | "kb">("task");
+  const [page, setPage] = useState<"task" | "kb" | "agent">("task");
   const [docs, setDocs] = useState<DocumentsResponse | null>(null);
   const [result, setResult] = useState<ExecuteResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -51,6 +64,9 @@ export default function Home() {
   const [taskInput, setTaskInput] = useState("");
   const [activeTab, setActiveTab] = useState<"plan" | "sources" | "json">("plan");
   const [robotStatus, setRobotStatus] = useState<"idle" | "running" | "complete" | "error">("idle");
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [pipelineStages, setPipelineStages] = useState<{ message: string; status: "pending" | "active" | "done" | "error"; icon?: string }[]>([]);
+  const [searchHits, setSearchHits] = useState<SearchResultEvent[]>([]);
 
   useEffect(() => {
     getDocuments().then(setDocs).catch(() => {});
@@ -73,24 +89,86 @@ export default function Home() {
     if (!taskInput.trim()) return;
     setLoading(true);
     setRobotStatus("running");
-    setStatusMessage("Searching documents for relevant specifications…");
     setActiveTab("plan");
+    setResult(null);
+    setPipelineStages([]);
+    setSearchHits([]);
+
     try {
-      const res = await executeTask(taskInput.trim());
-      setResult(res);
-      setRobotStatus(res.task_plan ? "complete" : "error");
-      setStatusMessage("");
+      // Upload any attached files first
+      if (attachedFiles.length > 0) {
+        setPipelineStages([{ message: `Uploading ${attachedFiles.length} file(s)…`, status: "active" }]);
+        for (const file of attachedFiles) {
+          await uploadDocument(file);
+        }
+        const refreshed = await getDocuments();
+        setDocs(refreshed);
+        setAttachedFiles([]);
+        setPipelineStages((prev) => prev.map((s) => ({ ...s, status: "done" as const })));
+      }
+
+      // Stream the pipeline execution
+      setPipelineStages((prev) => [...prev, { message: "Initializing pipeline…", status: "active" }]);
+
+      await executeTaskStream(taskInput.trim(), {
+        onStage: (stage) => {
+          setPipelineStages((prev) => {
+            // Mark previous active stages as done
+            const updated = prev.map((s) =>
+              s.status === "active" ? { ...s, status: "done" as const } : s
+            );
+            // Add new stage
+            return [
+              ...updated,
+              {
+                message: stage.message,
+                status: stage.stage === "complete" ? "done" as const : "active" as const,
+              },
+            ];
+          });
+        },
+        onSearchResult: (sr) => {
+          setSearchHits((prev) => [...prev, sr]);
+        },
+        onSearchError: () => {},
+        onDone: (res) => {
+          setResult(res);
+          setRobotStatus(res.task_plan ? "complete" : "error");
+          setPipelineStages([]);
+          setSearchHits([]);
+          setStatusMessage("");
+        },
+        onError: (errMsg) => {
+          setStatusMessage(`Error: ${errMsg}`);
+          setRobotStatus("error");
+          setPipelineStages((prev) =>
+            prev.map((s) =>
+              s.status === "active" ? { ...s, status: "error" as const } : s
+            )
+          );
+        },
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       setStatusMessage(`Error: ${msg}`);
       setRobotStatus("error");
+      setPipelineStages((prev) =>
+        prev.map((s) =>
+          s.status === "active" ? { ...s, status: "error" as const } : s
+        )
+      );
     } finally {
       setLoading(false);
     }
   }
 
   async function handleUpload(files: FileList | null) {
-    if (!files) return;
+    // When called with null, just refresh the documents list (used by KBPage after processing)
+    if (!files) {
+      const refreshed = await getDocuments();
+      setDocs(refreshed);
+      return;
+    }
     for (const file of Array.from(files)) {
       try {
         await uploadDocument(file);
@@ -133,6 +211,7 @@ export default function Home() {
         <nav className="flex-1 px-3 space-y-1">
           <NavItem icon={<Zap size={18} />} label="Task" active={page === "task"} onClick={() => setPage("task")} />
           <NavItem icon={<BookOpen size={18} />} label="Knowledge Base" active={page === "kb"} onClick={() => setPage("kb")} />
+          <NavItem icon={<MessageSquare size={18} />} label="AI Agent" active={page === "agent"} onClick={() => setPage("agent")} />
         </nav>
 
         <div className="px-5 pb-5">
@@ -145,7 +224,7 @@ export default function Home() {
         {/* Top bar */}
         <header className="h-12 flex items-center justify-between px-6 border-b border-gray-200 bg-white flex-shrink-0">
           <span className="text-sm font-semibold text-gray-800">
-            {page === "task" ? "⚙️ Task Execution" : "📚 Knowledge Base"}
+            {page === "task" ? "⚙️ Task Execution" : page === "agent" ? "🤖 AI Agent" : "📚 Knowledge Base"}
           </span>
           <div className="flex items-center gap-5 text-xs text-gray-400">
             <span className="flex items-center gap-1.5">
@@ -172,9 +251,16 @@ export default function Home() {
               activeTab={activeTab}
               setActiveTab={setActiveTab}
               robotStatus={robotStatus}
+              setRobotStatus={setRobotStatus}
               onExecute={handleExecute}
               docs={docs}
+              attachedFiles={attachedFiles}
+              setAttachedFiles={setAttachedFiles}
+              pipelineStages={pipelineStages}
+              searchHits={searchHits}
             />
+          ) : page === "agent" ? (
+            <AgentPage docs={docs} />
           ) : (
             <KBPage docs={docs} onUpload={handleUpload} />
           )}
@@ -212,7 +298,8 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; labe
 
 function TaskPage({
   taskInput, setTaskInput, examples, loading, statusMessage,
-  result, activeTab, setActiveTab, robotStatus, onExecute, docs,
+  result, activeTab, setActiveTab, robotStatus, setRobotStatus, onExecute, docs,
+  attachedFiles, setAttachedFiles, pipelineStages, searchHits,
 }: {
   taskInput: string;
   setTaskInput: (v: string) => void;
@@ -223,17 +310,48 @@ function TaskPage({
   activeTab: "plan" | "sources" | "json";
   setActiveTab: (v: "plan" | "sources" | "json") => void;
   robotStatus: string;
+  setRobotStatus: (s: "idle" | "running" | "complete" | "error") => void;
   onExecute: () => void;
   docs: DocumentsResponse | null;
+  attachedFiles: File[];
+  setAttachedFiles: (files: File[]) => void;
+  pipelineStages: { message: string; status: "pending" | "active" | "done" | "error" }[];
+  searchHits: { document: string; relevant: boolean }[];
 }) {
+  const [feedback, setFeedback] = useState("");
+  const [deploying, setDeploying] = useState(false);
+  const [deployMessage, setDeployMessage] = useState("");
+
+  async function handleDeploy() {
+    if (!result?.task_plan) return;
+    setDeploying(true);
+    setDeployMessage("");
+    try {
+      const res = await executeOnRobot(result.task_plan as unknown as Record<string, unknown>, feedback || undefined);
+      setDeployMessage(res.message);
+      setRobotStatus("running");
+      // Simulate completion after a few seconds
+      setTimeout(() => {
+        setRobotStatus("complete");
+        setDeployMessage("Execution complete — all steps finished.");
+      }, 5000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Deploy failed";
+      setDeployMessage(`Error: ${msg}`);
+      setRobotStatus("error");
+    } finally {
+      setDeploying(false);
+    }
+  }
+
   return (
     <div className="flex gap-6 p-6 h-full">
       {/* Left column */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Task input */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
-          <h2 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
-            <FileText size={16} className="text-teal-600" /> Task Definition
+        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-5">
+          <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <FileText size={20} className="text-teal-600" /> Task Definition
           </h2>
 
           <div className="mb-3">
@@ -259,8 +377,42 @@ function TaskPage({
             className="w-full resize-none rounded-lg border border-gray-200 p-3 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400/40 focus:border-teal-400 placeholder:text-gray-300"
           />
 
+          {/* Attached files */}
+          {attachedFiles.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {attachedFiles.map((f, i) => (
+                <span key={i} className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-teal-50 text-teal-700 border border-teal-200">
+                  <FileText size={12} />
+                  {f.name}
+                  <button onClick={() => setAttachedFiles(attachedFiles.filter((_, j) => j !== i))} className="hover:text-red-500 transition-colors">
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-center justify-between mt-3">
-            <span className="text-xs text-gray-400">{docs?.stats.count ?? 0} document(s) will be searched</span>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer hover:text-teal-600 transition-colors">
+                <Paperclip size={14} />
+                Attach PDF
+                <input
+                  type="file"
+                  accept=".pdf"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files) {
+                      setAttachedFiles([...attachedFiles, ...Array.from(e.target.files)]);
+                      e.target.value = "";
+                    }
+                  }}
+                />
+              </label>
+              <span className="text-xs text-gray-300">·</span>
+              <span className="text-xs text-gray-400">{docs?.stats.count ?? 0} document(s) will be searched</span>
+            </div>
             <button
               onClick={onExecute}
               disabled={loading || !taskInput.trim()}
@@ -275,6 +427,45 @@ function TaskPage({
             </button>
           </div>
         </div>
+
+        {/* Pipeline progress */}
+        {(loading || pipelineStages.length > 0) && (
+          <div className="mb-4 bg-white rounded-xl border border-gray-200 overflow-hidden animate-slide-up">
+            <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2">
+              {loading ? (
+                <Loader2 size={14} className="text-teal-500 animate-spin" />
+              ) : (
+                <CheckCircle2 size={14} className="text-emerald-500" />
+              )}
+              <span className="text-xs font-semibold text-gray-700">
+                {loading ? "Pipeline Running" : "Pipeline Complete"}
+              </span>
+              {searchHits.length > 0 && (
+                <span className="ml-auto text-[11px] text-gray-400">
+                  {searchHits.filter((h) => h.relevant).length}/{searchHits.length} docs matched
+                </span>
+              )}
+            </div>
+            <div className="px-4 py-2 space-y-1">
+              {pipelineStages.map((s, i) => (
+                <div key={i} className="flex items-center gap-2 py-1">
+                  {s.status === "done" ? (
+                    <CheckCircle2 size={13} className="text-emerald-500 flex-shrink-0" />
+                  ) : s.status === "error" ? (
+                    <XCircle size={13} className="text-red-500 flex-shrink-0" />
+                  ) : s.status === "active" ? (
+                    <Loader2 size={13} className="text-teal-500 animate-spin flex-shrink-0" />
+                  ) : (
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-gray-200 flex-shrink-0" />
+                  )}
+                  <span className={`text-xs ${s.status === "active" ? "text-teal-700 font-medium" : s.status === "done" ? "text-gray-500" : s.status === "error" ? "text-red-600" : "text-gray-400"}`}>
+                    {s.message}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Status */}
         {statusMessage && (
@@ -320,6 +511,51 @@ function TaskPage({
       <div className="w-72 flex-shrink-0 space-y-4">
         <RobotPanel status={robotStatus} />
         <CameraFeed />
+
+        {/* Execute on Robot */}
+        {result?.task_plan && (
+          <div className="bg-white rounded-xl border border-gray-200 p-4 animate-slide-up">
+            <h4 className="text-xs font-semibold text-gray-800 flex items-center gap-1.5 mb-3">
+              <Play size={14} className="text-teal-600" /> Deploy to Robot
+            </h4>
+
+            {/* Feedback / adjustments */}
+            <textarea
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder="Optional: add corrections or adjustments to the plan…"
+              rows={2}
+              className="w-full resize-none rounded-lg border border-gray-200 p-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400/40 focus:border-teal-400 placeholder:text-gray-300 mb-3"
+            />
+
+            <button
+              onClick={handleDeploy}
+              disabled={deploying || robotStatus === "running"}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                background: deploying || robotStatus === "running"
+                  ? "#aaa"
+                  : "linear-gradient(135deg, #37e0d8, #1a8a84)",
+              }}
+            >
+              {deploying ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : robotStatus === "running" ? (
+                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <ArrowRight size={15} />
+              )}
+              {deploying ? "Sending…" : robotStatus === "running" ? "Executing…" : "Execute on Robot"}
+            </button>
+
+            {deployMessage && (
+              <p className={`mt-2 text-xs ${deployMessage.startsWith("Error") ? "text-red-600" : "text-emerald-600"}`}>
+                {deployMessage}
+              </p>
+            )}
+          </div>
+        )}
+
         <KBSummary docs={docs} />
       </div>
     </div>
@@ -632,12 +868,159 @@ function JsonTab({ result }: { result: ExecuteResult | null }) {
 
 function KBPage({ docs, onUpload }: { docs: DocumentsResponse | null; onUpload: (files: FileList | null) => void }) {
   const [filter, setFilter] = useState("");
+  const [processing, setProcessing] = useState<{ name: string; status: "uploading" | "parsing" | "done" | "error"; error?: string }[]>([]);
+  const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
+  const [docContent, setDocContent] = useState<{ name: string; content: string; images: string[]; size_kb: number } | null>(null);
+  const [docLoading, setDocLoading] = useState(false);
+  const [docTab, setDocTab] = useState<"content" | "images">("content");
 
   const filtered = docs?.documents.filter(
     (d) => !filter || d.name.toLowerCase().includes(filter.toLowerCase())
   ) ?? [];
 
   const stats = docs?.stats ?? { count: 0, total_images: 0, total_size_kb: 0 };
+
+  async function handleKBUpload(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const fileArr = Array.from(files);
+
+    // Initialize processing state for all files
+    setProcessing(fileArr.map((f) => ({ name: f.name, status: "uploading" as const })));
+
+    for (let i = 0; i < fileArr.length; i++) {
+      const file = fileArr[i];
+      try {
+        // Show uploading
+        setProcessing((prev) => prev.map((p, j) => j === i ? { ...p, status: "uploading" } : p));
+
+        // Brief pause so user sees the uploading state
+        await new Promise((r) => setTimeout(r, 300));
+
+        // Show parsing
+        setProcessing((prev) => prev.map((p, j) => j === i ? { ...p, status: "parsing" } : p));
+
+        await uploadDocument(file);
+
+        // Done
+        setProcessing((prev) => prev.map((p, j) => j === i ? { ...p, status: "done" } : p));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Upload failed";
+        setProcessing((prev) => prev.map((p, j) => j === i ? { ...p, status: "error", error: msg } : p));
+      }
+    }
+
+    // Refresh docs list
+    onUpload(null);
+
+    // Clear processing after a moment
+    setTimeout(() => setProcessing([]), 3000);
+  }
+
+  async function openDocument(docName: string) {
+    setSelectedDoc(docName);
+    setDocLoading(true);
+    setDocTab("content");
+    try {
+      const data = await getDocumentContent(docName);
+      setDocContent(data);
+    } catch {
+      setDocContent(null);
+    } finally {
+      setDocLoading(false);
+    }
+  }
+
+  function closeDocument() {
+    setSelectedDoc(null);
+    setDocContent(null);
+  }
+
+  // If a document is open, show the viewer
+  if (selectedDoc) {
+    return (
+      <div className="max-w-5xl mx-auto p-8 animate-slide-up">
+        {/* Header */}
+        <div className="flex items-center gap-3 mb-6">
+          <button
+            onClick={closeDocument}
+            className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-teal-600 transition-colors"
+          >
+            <ChevronRight size={16} className="rotate-180" />
+            Back to Knowledge Base
+          </button>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          {/* Doc header */}
+          <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-teal-50 flex items-center justify-center text-teal-600 flex-shrink-0">
+              <FileText size={20} />
+            </div>
+            <div className="flex-1">
+              <h2 className="text-lg font-bold text-gray-800">{selectedDoc}</h2>
+              {docContent && (
+                <p className="text-xs text-gray-400">{docContent.size_kb} KB · {docContent.images.length} diagram(s)</p>
+              )}
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex border-b border-gray-200">
+            <button
+              onClick={() => setDocTab("content")}
+              className={`flex items-center gap-1.5 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+                docTab === "content" ? "border-teal-500 text-teal-700" : "border-transparent text-gray-400 hover:text-gray-600"
+              }`}
+            >
+              <FileText size={14} /> Content
+            </button>
+            <button
+              onClick={() => setDocTab("images")}
+              className={`flex items-center gap-1.5 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+                docTab === "images" ? "border-teal-500 text-teal-700" : "border-transparent text-gray-400 hover:text-gray-600"
+              }`}
+            >
+              <Image size={14} /> Diagrams {docContent ? `(${docContent.images.length})` : ""}
+            </button>
+          </div>
+
+          {/* Content */}
+          <div className="p-6 max-h-[calc(100vh-300px)] overflow-y-auto">
+            {docLoading ? (
+              <div className="flex items-center justify-center py-16 gap-2 text-gray-400">
+                <Loader2 size={20} className="animate-spin" />
+                <span className="text-sm">Loading document…</span>
+              </div>
+            ) : !docContent ? (
+              <div className="text-center py-16 text-gray-400 text-sm">Failed to load document.</div>
+            ) : docTab === "content" ? (
+              <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-600 prose-li:text-gray-600">
+                <MarkdownContent content={docContent.content} />
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                {docContent.images.length > 0 ? (
+                  docContent.images.map((img) => (
+                    <div key={img} className="rounded-lg border border-gray-200 overflow-hidden bg-gray-50">
+                      <img
+                        src={imageUrl(selectedDoc, img)}
+                        alt={img}
+                        className="w-full h-auto"
+                        loading="lazy"
+                      />
+                      <div className="px-3 py-2 text-xs text-gray-500 truncate border-t border-gray-100">{img}</div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="col-span-full text-center py-16 text-gray-400 text-sm">No diagrams extracted from this document.</div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto p-8 animate-slide-up">
@@ -665,7 +1048,11 @@ function KBPage({ docs, onUpload }: { docs: DocumentsResponse | null; onUpload: 
       <div className="space-y-2 mb-8">
         {filtered.length > 0 ? (
           filtered.map((doc) => (
-            <div key={doc.name} className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200 hover:border-teal-400 transition-colors">
+            <button
+              key={doc.name}
+              onClick={() => openDocument(doc.name)}
+              className="w-full flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200 hover:border-teal-400 hover:bg-teal-50/30 transition-colors cursor-pointer text-left"
+            >
               <div className="w-10 h-10 rounded-lg bg-teal-50 flex items-center justify-center text-teal-600 flex-shrink-0">
                 <FileText size={20} />
               </div>
@@ -674,7 +1061,7 @@ function KBPage({ docs, onUpload }: { docs: DocumentsResponse | null; onUpload: 
                 <div className="text-xs text-gray-400">{doc.size_kb} KB · {doc.image_count} diagram(s)</div>
               </div>
               <ArrowRight size={16} className="text-gray-300" />
-            </div>
+            </button>
           ))
         ) : filter ? (
           <p className="text-sm text-gray-400 text-center py-4">No documents matching &ldquo;{filter}&rdquo;</p>
@@ -687,10 +1074,328 @@ function KBPage({ docs, onUpload }: { docs: DocumentsResponse | null; onUpload: 
         <Upload size={28} className="mx-auto text-gray-300 mb-2" />
         <p className="text-sm text-gray-500 font-medium">Drop PDF files here or click to upload</p>
         <p className="text-xs text-gray-300 mt-1">Documents will be parsed and added to the knowledge base</p>
-        <input type="file" accept=".pdf" multiple className="hidden" onChange={(e) => onUpload(e.target.files)} />
+        <input type="file" accept=".pdf" multiple className="hidden" onChange={(e) => { handleKBUpload(e.target.files); e.target.value = ""; }} />
       </label>
+
+      {/* Processing indicator */}
+      {processing.length > 0 && (
+        <div className="mt-5 bg-white rounded-xl border border-gray-200 overflow-hidden animate-slide-up">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+            <Loader2 size={16} className="text-teal-500 animate-spin" />
+            <span className="text-sm font-semibold text-gray-700">Processing Documents</span>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {processing.map((p, i) => (
+              <div key={i} className="px-5 py-3 flex items-center gap-3">
+                {/* Status icon */}
+                {p.status === "done" ? (
+                  <CheckCircle2 size={18} className="text-emerald-500 flex-shrink-0" />
+                ) : p.status === "error" ? (
+                  <XCircle size={18} className="text-red-500 flex-shrink-0" />
+                ) : (
+                  <Loader2 size={18} className="text-teal-500 animate-spin flex-shrink-0" />
+                )}
+
+                {/* File info */}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-gray-800 truncate">{p.name}</div>
+                  <div className="text-xs text-gray-400">
+                    {p.status === "uploading" && "Uploading file…"}
+                    {p.status === "parsing" && "Parsing document & extracting images…"}
+                    {p.status === "done" && "Successfully added to knowledge base"}
+                    {p.status === "error" && (p.error ?? "Failed")}
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                {(p.status === "uploading" || p.status === "parsing") && (
+                  <div className="w-24 h-1.5 bg-gray-100 rounded-full overflow-hidden flex-shrink-0">
+                    <div
+                      className={`h-full rounded-full transition-all duration-1000 ${
+                        p.status === "uploading" ? "w-1/3 bg-teal-300" : "w-2/3 bg-teal-500"
+                      }`}
+                      style={{ animation: "progress-pulse 2s ease-in-out infinite" }}
+                    />
+                  </div>
+                )}
+
+                {p.status === "done" && (
+                  <span className="text-[11px] text-emerald-600 font-medium flex-shrink-0">Done</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+/* ========================================================================= */
+/* AI Agent Chat Page                                                        */
+/* ========================================================================= */
+
+function AgentPage({ docs }: { docs: DocumentsResponse | null }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const SUGGESTIONS = [
+    "What voltage does the Arduino 3.3V pin output?",
+    "List all digital I/O pins and their functions",
+    "What are the power consumption specs?",
+    "Explain the USB connection pinout",
+  ];
+
+  async function handleSend() {
+    const text = input.trim();
+    if (!text || sending) return;
+
+    const userMsg: ChatMessage = { role: "user", content: text };
+    const updatedMessages = [...messages, userMsg];
+    setMessages(updatedMessages);
+    setInput("");
+    setSending(true);
+
+    try {
+      const res = await chatWithAgent(text, messages);
+      setMessages([...updatedMessages, { role: "assistant", content: res.reply }]);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "Failed to get response";
+      setMessages([...updatedMessages, { role: "assistant", content: `⚠️ Error: ${errMsg}` }]);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Messages area */}
+      <div className="flex-1 overflow-y-auto px-6 py-6">
+        {messages.length === 0 ? (
+          /* Welcome state */
+          <div className="max-w-2xl mx-auto mt-12">
+            <div className="text-center mb-10">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-teal-100 to-teal-50 flex items-center justify-center mx-auto mb-4">
+                <Sparkles size={28} className="text-teal-600" />
+              </div>
+              <h2 className="text-xl font-bold text-gray-800 mb-2">DocOps AI Agent</h2>
+              <p className="text-sm text-gray-400 max-w-md mx-auto">
+                Ask questions about your uploaded documentation. I can find specs, explain pinouts,
+                compare values, and help with troubleshooting.
+              </p>
+              {docs && (
+                <p className="text-xs text-teal-600 mt-3 font-medium">
+                  {docs.stats.count} document(s) • {docs.stats.total_images} diagrams indexed
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              {SUGGESTIONS.map((s, i) => (
+                <button
+                  key={i}
+                  onClick={() => { setInput(s); }}
+                  className="text-left p-4 rounded-xl border border-gray-200 hover:border-teal-400 hover:bg-teal-50/30 transition-colors group"
+                >
+                  <div className="flex items-start gap-2">
+                    <MessageSquare size={14} className="text-gray-300 group-hover:text-teal-500 mt-0.5 flex-shrink-0" />
+                    <span className="text-sm text-gray-600 group-hover:text-gray-800">{s}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          /* Conversation */
+          <div className="max-w-3xl mx-auto space-y-5">
+            {messages.map((msg, i) => (
+              <div key={i} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"} animate-slide-up`}>
+                {msg.role === "assistant" && (
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-teal-500 to-teal-600 flex items-center justify-center flex-shrink-0 mt-1">
+                    <Bot size={16} className="text-white" />
+                  </div>
+                )}
+                <div
+                  className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                    msg.role === "user"
+                      ? "bg-teal-600 text-white rounded-br-md"
+                      : "bg-gray-100 text-gray-800 rounded-bl-md"
+                  }`}
+                >
+                  {msg.role === "assistant" ? (
+                    <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-700 prose-li:text-gray-700 prose-strong:text-gray-800 prose-code:bg-gray-200 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-teal-700 prose-pre:bg-gray-800 prose-pre:text-gray-100">
+                      <MarkdownContent content={msg.content} />
+                    </div>
+                  ) : (
+                    msg.content
+                  )}
+                </div>
+                {msg.role === "user" && (
+                  <div className="w-8 h-8 rounded-lg bg-gray-200 flex items-center justify-center flex-shrink-0 mt-1">
+                    <User size={16} className="text-gray-500" />
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {/* Typing indicator */}
+            {sending && (
+              <div className="flex gap-3 animate-slide-up">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-teal-500 to-teal-600 flex items-center justify-center flex-shrink-0 mt-1">
+                  <Bot size={16} className="text-white" />
+                </div>
+                <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3">
+                  <div className="flex gap-1.5">
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
+        )}
+      </div>
+
+      {/* Input bar */}
+      <div className="border-t border-gray-200 bg-white px-6 py-4">
+        <div className="max-w-3xl mx-auto">
+          <div className="flex gap-3">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+              placeholder="Ask about your documents…"
+              disabled={sending}
+              className="flex-1 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100 disabled:opacity-50 disabled:bg-gray-50 placeholder:text-gray-300"
+            />
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || sending}
+              className="px-5 py-3 rounded-xl text-white text-sm font-semibold flex items-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: !input.trim() || sending ? "#ccc" : "linear-gradient(135deg, #37e0d8, #1a8a84)" }}
+            >
+              {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              Send
+            </button>
+          </div>
+          <p className="text-[11px] text-gray-300 mt-2 text-center">
+            Answers are generated from your uploaded documentation using Gemini AI
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Simple Markdown renderer */
+function MarkdownContent({ content }: { content: string }) {
+  // Basic markdown: bold, code blocks, inline code, headers, bullets, line breaks
+  const lines = content.split("\n");
+  const elements: React.ReactNode[] = [];
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
+  let codeKey = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        elements.push(
+          <pre key={`code-${codeKey++}`} className="bg-gray-800 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto my-2">
+            <code>{codeLines.join("\n")}</code>
+          </pre>
+        );
+        codeLines = [];
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      elements.push(<br key={`br-${i}`} />);
+      continue;
+    }
+
+    const formatted = formatInline(line);
+
+    if (line.startsWith("### ")) {
+      elements.push(<h3 key={i} className="font-bold text-sm mt-3 mb-1">{formatInline(line.slice(4))}</h3>);
+    } else if (line.startsWith("## ")) {
+      elements.push(<h2 key={i} className="font-bold text-base mt-3 mb-1">{formatInline(line.slice(3))}</h2>);
+    } else if (line.startsWith("# ")) {
+      elements.push(<h1 key={i} className="font-bold text-lg mt-3 mb-1">{formatInline(line.slice(2))}</h1>);
+    } else if (line.match(/^[-*]\s/)) {
+      elements.push(
+        <div key={i} className="flex gap-2 ml-2">
+          <span className="text-teal-500 mt-0.5">•</span>
+          <span>{formatInline(line.replace(/^[-*]\s/, ""))}</span>
+        </div>
+      );
+    } else if (line.match(/^\d+\.\s/)) {
+      const num = line.match(/^(\d+)\./)?.[1];
+      elements.push(
+        <div key={i} className="flex gap-2 ml-2">
+          <span className="text-teal-600 font-semibold text-xs mt-0.5">{num}.</span>
+          <span>{formatInline(line.replace(/^\d+\.\s/, ""))}</span>
+        </div>
+      );
+    } else {
+      elements.push(<p key={i}>{formatted}</p>);
+    }
+  }
+
+  return <>{elements}</>;
+}
+
+function formatInline(text: string): React.ReactNode {
+  // Bold, inline code
+  const parts: React.ReactNode[] = [];
+  const regex = /(\*\*(.+?)\*\*|`([^`]+)`)/g;
+  let lastIndex = 0;
+  let match;
+  let key = 0;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    if (match[2]) {
+      parts.push(<strong key={key++}>{match[2]}</strong>);
+    } else if (match[3]) {
+      parts.push(
+        <code key={key++} className="bg-gray-200 px-1 py-0.5 rounded text-teal-700 text-xs">
+          {match[3]}
+        </code>
+      );
+    }
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+  return parts.length === 1 ? parts[0] : <>{parts}</>;
 }
 
 /* ========================================================================= */
