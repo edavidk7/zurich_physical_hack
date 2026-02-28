@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 vlm keypoint extractor for robotic test point localization.
-uses gemini robotics-er 1.5 to ground schematic references onto live camera feeds.
+uses gemini to ground schematic references onto live camera feeds.
 
 usage:
     python vlm_keypoint.py schematic.png camera.png -p "the ATmega328P chip"
@@ -9,17 +9,22 @@ usage:
 """
 
 import argparse
+import base64
+import io
 import json
-import mimetypes
 import re
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("QtAgg")
-import matplotlib.pyplot as plt
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 from google import genai
 from google.genai import types
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+KEYPOINT_COLORS = ["#00ff00", "#ff00ff", "#00ffff", "#ffff00", "#ff8800"]
 
 
 def parse_json_response(raw_text: str) -> list[dict]:
@@ -30,7 +35,8 @@ def parse_json_response(raw_text: str) -> list[dict]:
         data = [data]
     return data
 
-def load_and_prep_image(img_path: Path, target_width: int | None) -> Image.Image:
+
+def load_and_prep_image(img_path: Path, target_width: int | None = None) -> Image.Image:
     """bakes exif rotation and normalizes resolution for the ER model."""
     img = Image.open(img_path)
     img = ImageOps.exif_transpose(img)
@@ -40,7 +46,107 @@ def load_and_prep_image(img_path: Path, target_width: int | None) -> Image.Image
     return img
 
 
+# ---------------------------------------------------------------------------
+# Core API — importable by server (no matplotlib)
+# ---------------------------------------------------------------------------
+
+def extract_keypoints(
+    reference_images: list[Image.Image],
+    camera_image: Image.Image,
+    prompt: str,
+    model: str = "gemini-2.5-flash",
+    thinking_budget: int = 0,
+) -> list[dict]:
+    """
+    Call the VLM to locate keypoints in the camera image using reference images.
+
+    Returns a list of dicts: [{"point": [y, x], "label": str}]
+    Coordinates are normalised to 0-1000.
+    """
+    client = genai.Client()
+
+    contents = []
+    cam_idx = len(reference_images) + 1
+
+    for idx, img in enumerate(reference_images, start=1):
+        contents.append(f"Image {idx} (reference schematic/documentation):")
+        contents.append(img)
+
+    contents.append(f"Image {cam_idx} (live camera feed — locate objects HERE):")
+    contents.append(camera_image)
+    contents.append(
+        f"Locate the following in Image {cam_idx} (the live camera feed): {prompt}.\n"
+        "The preceding images are reference schematics for context only.\n"
+        'Return the answer as JSON: [{"point": [y, x], "label": "<name>"}].\n'
+        "Points are in [y, x] format normalised to 0-1000.\n"
+        f"Only return points visible in Image {cam_idx}. If not found, return []."
+    )
+
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            temperature=1.0,
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=thinking_budget,
+            ),
+        ),
+    )
+
+    return parse_json_response(response.text.strip())
+
+
+def annotate_image_pil(image: Image.Image, keypoints: list[dict]) -> Image.Image:
+    """
+    Draw keypoint markers on a PIL Image. Returns a new annotated RGB image.
+    Also mutates each keypoint dict to add a "pixel": [px_x, px_y] field.
+    """
+    img = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    r = max(12, int(w * 0.018))
+
+    for i, det in enumerate(keypoints):
+        point = det["point"]
+        label = det.get("label", f"target_{i}")
+        norm_y, norm_x = point[0], point[1]
+        px_x = int((norm_x / 1000.0) * w)
+        px_y = int((norm_y / 1000.0) * h)
+        color = KEYPOINT_COLORS[i % len(KEYPOINT_COLORS)]
+
+        # circle
+        draw.ellipse([px_x - r, px_y - r, px_x + r, px_y + r], outline=color, width=3)
+        # crosshair
+        draw.line([(px_x - r - 6, px_y), (px_x + r + 6, px_y)], fill=color, width=2)
+        draw.line([(px_x, px_y - r - 6), (px_x, px_y + r + 6)], fill=color, width=2)
+        # label background + text
+        tx, ty = px_x + r + 6, px_y - 10
+        bbox = draw.textbbox((tx, ty), label)
+        draw.rectangle([bbox[0] - 3, bbox[1] - 2, bbox[2] + 3, bbox[3] + 2], fill="black")
+        draw.text((tx, ty), label, fill=color)
+
+        det["pixel"] = [px_x, px_y]
+
+    return img
+
+
+def annotated_image_to_base64(image: Image.Image) -> str:
+    """Encode a PIL Image as a base64 PNG string."""
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
+    import matplotlib
+    matplotlib.use("QtAgg")
+    import matplotlib.pyplot as plt
+
     parser = argparse.ArgumentParser(
         description="vlm keypoint extractor for robotic test point localization",
         epilog="example: python vlm_keypoint.py schematic.png camera.png -p 'the ATmega328P chip'",
@@ -50,78 +156,45 @@ def main():
         nargs="+",
         help="paths to images. the final image is the live camera feed; preceding images are reference material.",
     )
+    parser.add_argument("-p", "--prompt", required=True, help="the component or feature to localize")
+    parser.add_argument("-tb", "--thinking-budget", type=int, default=0)
     parser.add_argument(
-        "-p", "--prompt",
-        required=True,
-        help="the component or feature to localize",
+        "-tl", "--thinking-level",
+        type=str, choices=["minimal", "low", "medium", "high", None], default=None,
     )
-    parser.add_argument(
-        "-tb", "--thinking-budget",
-        type=int,
-        default=0,
-        help="thinking budget for the model. 0 for simple pointing, higher for complex reasoning (default: 0)",
-    )
-    
-    parser.add_argument(
-        "-tl",
-        "--thinking-level",
-        type=str,
-        choices=["minimal","low","medium","high", None],
-        default=None,
-        help="thinking level of the model (for newer gemini 3)",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="sampling temperature",
-    )
-    parser.add_argument(
-        "--model",
-        default="gemini-3-flash-preview",
-        help="model id",
-    )
-    parser.add_argument(
-        "-tw",
-        "--target_width",
-        default=None
-    )
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--model", default="gemini-3-flash-preview")
+    parser.add_argument("-tw", "--target_width", default=None)
     args = parser.parse_args()
 
-    # validate all image paths upfront
     for img_path in args.images:
         if not Path(img_path).exists():
             print(f"!!! file not found: {img_path}")
             return
 
-    client = genai.Client()
-
-    # build multimodal content: label each image so the model can differentiate
-    contents = []
-    total_imgs = len(args.images)
-
-    for idx, img_path in enumerate(args.images, start=1):
-        img = load_and_prep_image(img_path, args.target_width)
-        if idx < total_imgs - 1:
-            contents.append(f"Image {idx} (reference schematic/documentation):")
-        else:
-            contents.append(f"Image {idx} (live camera feed — locate objects HERE):")
-        contents.append(
-            img
-        )
-
-    prompt = f"""
-Locate the following component in Image {total_imgs} (the live camera feed): {args.prompt}.
-The preceding images are reference schematics for context only.
-Return the answer as JSON: [{{"point": [y, x], "label": "<identifying name>"}}].
-Points are in [y, x] format normalized to 0-1000.
-Only return points visible in Image {total_imgs}. If not found, return [].
-"""
-    contents.append(prompt)
+    ref_imgs = [load_and_prep_image(Path(p), args.target_width) for p in args.images[:-1]]
+    camera_img = load_and_prep_image(Path(args.images[-1]), args.target_width)
 
     print(f"querying {args.model} (thinking_budget={args.thinking_budget})...")
-    
-    thinking_args = {"include_thoughts": True}
+
+    # override thinking config for CLI (supports thinking_level)
+    client = genai.Client()
+    cam_idx = len(ref_imgs) + 1
+    contents = []
+    for idx, img in enumerate(ref_imgs, start=1):
+        contents.append(f"Image {idx} (reference schematic/documentation):")
+        contents.append(img)
+    contents.append(f"Image {cam_idx} (live camera feed — locate objects HERE):")
+    contents.append(camera_img)
+    contents.append(
+        f"Locate the following in Image {cam_idx} (the live camera feed): {args.prompt}.\n"
+        "The preceding images are reference schematics for context only.\n"
+        'Return the answer as JSON: [{"point": [y, x], "label": "<identifying name>"}].\n'
+        "Points are in [y, x] format normalized to 0-1000.\n"
+        f"Only return points visible in Image {cam_idx}. If not found, return []."
+    )
+
+    thinking_args: dict = {"include_thoughts": True}
     if args.thinking_level is None:
         thinking_args["thinking_budget"] = args.thinking_budget
     else:
@@ -149,45 +222,15 @@ Only return points visible in Image {total_imgs}. If not found, return [].
         print("model returned empty results — target not found in camera feed.")
         return
 
-    # load the target image (always the last one) for visualization
-    target_img = Image.open(args.images[-1])
-    target_img = ImageOps.exif_transpose(target_img)
-    width, height = target_img.size
+    annotated = annotate_image_pil(camera_img, data)
 
+    for i, det in enumerate(data):
+        px = det.get("pixel", [0, 0])
+        print(f"  [{i}] '{det.get('label')}' -> pixel {px}  [norm: y={det['point'][0]}, x={det['point'][1]}]")
+
+    # Show with matplotlib
     fig, ax = plt.subplots(figsize=(10, 8))
-    ax.imshow(target_img)
-
-    # plot all detected points
-    colors = ["#00ff00", "#ff00ff", "#00ffff", "#ffff00", "#ff8800"]
-    for i, detection in enumerate(data):
-        point = detection["point"]
-        label = detection.get("label", f"target_{i}")
-
-        # gemini returns [y, x] normalized to 0-1000
-        norm_y, norm_x = point[0], point[1]
-        px_x = int((norm_x / 1000.0) * width)
-        px_y = int((norm_y / 1000.0) * height)
-
-        color = colors[i % len(colors)]
-
-        ax.plot(px_x, px_y, marker="+", color=color, markersize=24, markeredgewidth=3)
-        circle = plt.Circle(
-            (px_x, px_y), radius=width * 0.02, color=color, fill=False, linewidth=2
-        )
-        ax.add_patch(circle)
-        ax.annotate(
-            label,
-            (px_x, px_y),
-            textcoords="offset points",
-            xytext=(12, -12),
-            color=color,
-            fontsize=10,
-            fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.7),
-        )
-
-        print(f"  [{i}] '{label}' -> pixel ({px_x}, {px_y})  [norm: y={norm_y}, x={norm_x}]")
-
+    ax.imshow(annotated)
     ax.set_title(f"Prompt: {args.prompt} | {len(data)} point(s) detected")
     ax.axis("off")
     plt.tight_layout()

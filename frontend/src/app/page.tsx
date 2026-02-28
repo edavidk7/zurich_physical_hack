@@ -43,6 +43,8 @@ import {
   chatWithAgent,
   executeOnRobot,
   getDocumentContent,
+  locateKeypoints,
+  executeStepKeypoints,
 } from "@/lib/api";
 
 import type {
@@ -52,6 +54,7 @@ import type {
   Step,
   ChatMessage,
   SearchResultEvent,
+  KeypointResponse,
 } from "@/lib/types";
 
 // ===========================================================================
@@ -65,7 +68,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [taskInput, setTaskInput] = useState("");
-  const [activeTab, setActiveTab] = useState<"plan" | "sources" | "json">("plan");
+  const [activeTab, setActiveTab] = useState<"plan" | "sources" | "json" | "keypoints">("plan");
   const [robotStatus, setRobotStatus] = useState<"idle" | "running" | "complete" | "error">("idle");
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [pipelineStages, setPipelineStages] = useState<{ message: string; status: "pending" | "active" | "done" | "error"; icon?: string }[]>([]);
@@ -310,8 +313,8 @@ function TaskPage({
   loading: boolean;
   statusMessage: string;
   result: ExecuteResult | null;
-  activeTab: "plan" | "sources" | "json";
-  setActiveTab: (v: "plan" | "sources" | "json") => void;
+  activeTab: "plan" | "sources" | "json" | "keypoints";
+  setActiveTab: (v: "plan" | "sources" | "json" | "keypoints") => void;
   robotStatus: string;
   setRobotStatus: (s: "idle" | "running" | "complete" | "error") => void;
   onExecute: () => void;
@@ -321,30 +324,75 @@ function TaskPage({
   pipelineStages: { message: string; status: "pending" | "active" | "done" | "error" }[];
   searchHits: { document: string; relevant: boolean }[];
 }) {
-  const [feedback, setFeedback] = useState("");
-  const [deploying, setDeploying] = useState(false);
-  const [deployMessage, setDeployMessage] = useState("");
+  // ── step-by-step guided execution ──────────────────────────────────────
+  const [execMode, setExecMode] = useState<"idle" | "running" | "done" | "aborted">("idle");
+  const [execStep, setExecStep] = useState(0);
+  const [execKp, setExecKp] = useState<KeypointResponse | null>(null);
+  const [execLoading, setExecLoading] = useState(false);
+  const [execError, setExecError] = useState("");
 
-  async function handleDeploy() {
-    if (!result?.task_plan) return;
-    setDeploying(true);
-    setDeployMessage("");
+  const referenceImages = (result?.search_results ?? []).flatMap((sr) =>
+    (sr.extracted_info?.relevant_images ?? []).map((img) => {
+      const imgName = (img.split("/").pop() ?? img);
+      return {
+        doc_name: sr.document_name.replace("_parsed", ""),
+        image_name: imgName.endsWith(".png") ? imgName : imgName + ".png",
+      };
+    })
+  );
+
+  async function fetchStepKeypoints(stepIdx: number) {
+    const steps = result?.task_plan?.task_plan?.steps ?? [];
+    const step = steps[stepIdx];
+    if (!step) return;
+    setExecLoading(true);
+    setExecError("");
+    setExecKp(null);
     try {
-      const res = await executeOnRobot(result.task_plan as unknown as Record<string, unknown>, feedback || undefined);
-      setDeployMessage(res.message);
-      setRobotStatus("running");
-      // Simulate completion after a few seconds
-      setTimeout(() => {
-        setRobotStatus("complete");
-        setDeployMessage("Execution complete — all steps finished.");
-      }, 5000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Deploy failed";
-      setDeployMessage(`Error: ${msg}`);
-      setRobotStatus("error");
+      const kp = await executeStepKeypoints(
+        step as unknown as Record<string, unknown>,
+        referenceImages,
+      );
+      setExecKp(kp);
+    } catch (e) {
+      setExecError(e instanceof Error ? e.message : "Failed to get keypoints");
     } finally {
-      setDeploying(false);
+      setExecLoading(false);
     }
+  }
+
+  async function startExecution() {
+    if (!result?.task_plan) return;
+    setExecMode("running");
+    setExecStep(0);
+    setExecKp(null);
+    setExecError("");
+    setRobotStatus("running");
+    await fetchStepKeypoints(0);
+  }
+
+  async function confirmStep() {
+    const steps = result?.task_plan?.task_plan?.steps ?? [];
+    const next = execStep + 1;
+    if (next >= steps.length) {
+      setExecMode("done");
+      setRobotStatus("complete");
+    } else {
+      setExecStep(next);
+      await fetchStepKeypoints(next);
+    }
+  }
+
+  function abortExecution() {
+    setExecMode("aborted");
+    setRobotStatus("idle");
+  }
+
+  function resetExecution() {
+    setExecMode("idle");
+    setExecStep(0);
+    setExecKp(null);
+    setExecError("");
   }
 
   return (
@@ -481,32 +529,50 @@ function TaskPage({
           </div>
         )}
 
-        {/* Result tabs */}
+        {/* Result area: tabs when idle, execution panel when running */}
         <div className="flex-1 bg-white rounded-xl border border-gray-200 flex flex-col min-h-0">
-          <div className="flex border-b border-gray-200">
-            {([
-              { key: "plan" as const, icon: <Layers size={14} />, label: "Task Plan" },
-              { key: "sources" as const, icon: <Search size={14} />, label: "Source Documents" },
-              { key: "json" as const, icon: <Code2 size={14} />, label: "JSON" },
-            ]).map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setActiveTab(t.key)}
-                className={`flex items-center gap-1.5 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === t.key
-                    ? "border-teal-500 text-teal-700"
-                    : "border-transparent text-gray-400 hover:text-gray-600"
-                }`}
-              >
-                {t.icon} {t.label}
-              </button>
-            ))}
-          </div>
-          <div className="flex-1 overflow-y-auto p-5">
-            {activeTab === "plan" && <PlanTab result={result} />}
-            {activeTab === "sources" && <SourcesTab result={result} />}
-            {activeTab === "json" && <JsonTab result={result} />}
-          </div>
+          {execMode === "idle" ? (
+            <>
+              <div className="flex border-b border-gray-200">
+                {([
+                  { key: "plan" as const, icon: <Layers size={14} />, label: "Task Plan" },
+                  { key: "sources" as const, icon: <Search size={14} />, label: "Source Documents" },
+                  { key: "keypoints" as const, icon: <Camera size={14} />, label: "Keypoints" },
+                  { key: "json" as const, icon: <Code2 size={14} />, label: "JSON" },
+                ]).map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => setActiveTab(t.key)}
+                    className={`flex items-center gap-1.5 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+                      activeTab === t.key
+                        ? "border-teal-500 text-teal-700"
+                        : "border-transparent text-gray-400 hover:text-gray-600"
+                    }`}
+                  >
+                    {t.icon} {t.label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex-1 overflow-y-auto p-5">
+                {activeTab === "plan" && <PlanTab result={result} />}
+                {activeTab === "sources" && <SourcesTab result={result} />}
+                {activeTab === "keypoints" && <KeypointsTab result={result} />}
+                {activeTab === "json" && <JsonTab result={result} />}
+              </div>
+            </>
+          ) : (
+            <StepExecutionPanel
+              result={result}
+              execMode={execMode}
+              execStep={execStep}
+              execKp={execKp}
+              execLoading={execLoading}
+              execError={execError}
+              onConfirm={confirmStep}
+              onAbort={abortExecution}
+              onReset={resetExecution}
+            />
+          )}
         </div>
       </div>
 
@@ -515,47 +581,22 @@ function TaskPage({
         <RobotPanel status={robotStatus} />
         <CameraFeed />
 
-        {/* Execute on Robot */}
-        {result?.task_plan && (
+        {/* Begin guided execution */}
+        {result?.task_plan && execMode === "idle" && (
           <div className="bg-white rounded-xl border border-gray-200 p-4 animate-slide-up">
-            <h4 className="text-xs font-semibold text-gray-800 flex items-center gap-1.5 mb-3">
-              <Play size={14} className="text-teal-600" /> Deploy to Robot
+            <h4 className="text-xs font-semibold text-gray-800 flex items-center gap-1.5 mb-2">
+              <Play size={14} className="text-teal-600" /> Guided Execution
             </h4>
-
-            {/* Feedback / adjustments */}
-            <textarea
-              value={feedback}
-              onChange={(e) => setFeedback(e.target.value)}
-              placeholder="Optional: add corrections or adjustments to the plan…"
-              rows={2}
-              className="w-full resize-none rounded-lg border border-gray-200 p-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400/40 focus:border-teal-400 placeholder:text-gray-300 mb-3"
-            />
-
+            <p className="text-xs text-gray-400 mb-3">
+              Execute step-by-step with live camera verification and keypoint confirmation.
+            </p>
             <button
-              onClick={handleDeploy}
-              disabled={deploying || robotStatus === "running"}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{
-                background: deploying || robotStatus === "running"
-                  ? "#aaa"
-                  : "linear-gradient(135deg, #37e0d8, #1a8a84)",
-              }}
+              onClick={startExecution}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white transition-all"
+              style={{ background: "linear-gradient(135deg, #37e0d8, #1a8a84)" }}
             >
-              {deploying ? (
-                <Loader2 size={15} className="animate-spin" />
-              ) : robotStatus === "running" ? (
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <ArrowRight size={15} />
-              )}
-              {deploying ? "Sending…" : robotStatus === "running" ? "Executing…" : "Execute on Robot"}
+              <ArrowRight size={15} /> Begin Execution
             </button>
-
-            {deployMessage && (
-              <p className={`mt-2 text-xs ${deployMessage.startsWith("Error") ? "text-red-600" : "text-emerald-600"}`}>
-                {deployMessage}
-              </p>
-            )}
           </div>
         )}
 
@@ -681,6 +722,175 @@ function KBSummary({ docs }: { docs: DocumentsResponse | null }) {
         <span className="font-bold text-gray-700">{docs?.stats.count ?? 0}</span> document(s) ·{" "}
         <span className="font-bold text-gray-700">{docs?.stats.total_images ?? 0}</span> diagrams
       </div>
+    </div>
+  );
+}
+
+/* ========================================================================= */
+/* Step Execution Panel                                                      */
+/* ========================================================================= */
+
+const EXEC_COLORS = ["#00ff00", "#ff00ff", "#00ffff", "#ffff00", "#ff8800"];
+
+function StepExecutionPanel({
+  result, execMode, execStep, execKp, execLoading, execError, onConfirm, onAbort, onReset,
+}: {
+  result: ExecuteResult | null;
+  execMode: "idle" | "running" | "done" | "aborted";
+  execStep: number;
+  execKp: KeypointResponse | null;
+  execLoading: boolean;
+  execError: string;
+  onConfirm: () => void;
+  onAbort: () => void;
+  onReset: () => void;
+}) {
+  const steps: Step[] = result?.task_plan?.task_plan?.steps ?? [];
+  const step = steps[execStep] as Step | undefined;
+  const total = steps.length;
+
+  if (execMode === "done") {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 animate-slide-up">
+        <CheckCircle2 size={48} className="text-emerald-500" />
+        <h3 className="text-lg font-bold text-gray-800">All steps completed</h3>
+        <p className="text-sm text-gray-400 text-center">All {total} step{total !== 1 ? "s" : ""} were confirmed and executed.</p>
+        <button onClick={onReset} className="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg transition-colors">
+          Back to Plan
+        </button>
+      </div>
+    );
+  }
+
+  if (execMode === "aborted") {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 animate-slide-up">
+        <XCircle size={48} className="text-red-400" />
+        <h3 className="text-lg font-bold text-gray-800">Execution aborted</h3>
+        <p className="text-sm text-gray-400">Stopped at step {execStep + 1} of {total}.</p>
+        <button onClick={onReset} className="px-5 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-semibold rounded-lg transition-colors">
+          Back to Plan
+        </button>
+      </div>
+    );
+  }
+
+  const params = (step?.parameters ?? {}) as Record<string, unknown>;
+  const expected = params.expected_value as { nominal?: number; min?: number; max?: number; unit?: string } | undefined;
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 animate-slide-up">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-200 bg-gray-50">
+        <span className="text-xs font-bold text-teal-700 bg-teal-100 px-2.5 py-1 rounded-full">
+          Step {execStep + 1} / {total}
+        </span>
+        {step && (
+          <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">{step.action}</span>
+        )}
+        <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-teal-500 rounded-full transition-all"
+            style={{ width: `${((execStep + 1) / total) * 100}%` }}
+          />
+        </div>
+        <button onClick={onAbort} className="text-xs text-red-500 hover:text-red-700 font-medium transition-colors">
+          Abort
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-5 space-y-4">
+        {/* Step description */}
+        {step && (
+          <div className="space-y-2">
+            <p className="text-sm font-semibold text-gray-800">{step.description}</p>
+            <div className="flex flex-wrap gap-2 text-xs">
+              {params.probe_positive && (
+                <span className="px-2.5 py-1 rounded-md bg-teal-50 text-teal-700 border border-teal-200">
+                  Probe+ {String(params.probe_positive)}
+                </span>
+              )}
+              {params.probe_negative && (
+                <span className="px-2.5 py-1 rounded-md bg-gray-50 text-gray-600 border border-gray-200">
+                  Probe− {String(params.probe_negative)}
+                </span>
+              )}
+              {expected?.nominal != null && (
+                <span className="px-2.5 py-1 rounded-md bg-amber-50 text-amber-700 border border-amber-200">
+                  Expected {expected.nominal} {expected.unit ?? ""} ({expected.min}–{expected.max})
+                </span>
+              )}
+            </div>
+            {step.pass_criteria && (
+              <p className="text-xs text-emerald-700 flex items-center gap-1">
+                <CheckCircle2 size={12} /> {step.pass_criteria}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Camera + keypoints */}
+        {execLoading ? (
+          <div className="flex flex-col items-center justify-center py-10 gap-3 text-gray-400">
+            <Loader2 size={28} className="animate-spin text-teal-500" />
+            <p className="text-sm">Capturing camera frame and analysing with VLM…</p>
+          </div>
+        ) : execError ? (
+          <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+            {execError}
+          </div>
+        ) : execKp ? (
+          <div className="space-y-3">
+            {/* Annotated image */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`data:image/png;base64,${execKp.annotated_image}`}
+              alt="Camera frame with keypoints"
+              className="w-full rounded-xl border border-gray-200 object-contain"
+            />
+            {/* Keypoint list */}
+            {execKp.keypoints.length > 0 && (
+              <div className="grid grid-cols-1 gap-1.5">
+                {execKp.keypoints.map((kp, i) => (
+                  <div key={i} className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full flex-shrink-0 border-2"
+                      style={{ borderColor: EXEC_COLORS[i % EXEC_COLORS.length], backgroundColor: "black" }}
+                    />
+                    <span className="text-sm text-gray-800 flex-1">{kp.label}</span>
+                    {kp.pixel && (
+                      <span className="text-xs font-mono text-gray-400">
+                        ({kp.pixel[0]}, {kp.pixel[1]})
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-gray-400 italic">{execKp.prompt}</p>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Confirm footer */}
+      {!execLoading && (
+        <div className="px-5 py-4 border-t border-gray-200 flex gap-3">
+          <button
+            onClick={onConfirm}
+            className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold text-white transition-colors"
+            style={{ background: "linear-gradient(135deg, #37e0d8, #1a8a84)" }}
+          >
+            <CheckCircle2 size={15} />
+            {execStep + 1 < total ? `Confirm & Go to Step ${execStep + 2}` : "Confirm & Complete"}
+          </button>
+          <button
+            onClick={onAbort}
+            className="px-4 py-2.5 rounded-lg text-sm font-semibold text-red-600 border border-red-200 hover:bg-red-50 transition-colors"
+          >
+            Abort
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -930,6 +1140,182 @@ function JsonTab({ result }: { result: ExecuteResult | null }) {
           <pre className="text-xs bg-gray-50 border border-gray-200 rounded-lg p-4 overflow-x-auto max-h-96 overflow-y-auto">
             {JSON.stringify(result.search_results, null, 2)}
           </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ========================================================================= */
+/* Keypoints Tab                                                             */
+/* ========================================================================= */
+
+const KEYPOINT_COLORS = ["#00ff00", "#ff00ff", "#00ffff", "#ffff00", "#ff8800"];
+
+function KeypointsTab({ result }: { result: ExecuteResult | null }) {
+  const [prompt, setPrompt] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [kpResult, setKpResult] = useState<KeypointResponse | null>(null);
+
+  // Build default prompt from task plan's first probe step
+  const defaultPrompt = (() => {
+    const steps = result?.task_plan?.task_plan?.steps ?? [];
+    const probeStep = steps.find((s: Step) => ["PROBE", "MOVE", "MEASURE"].includes(s.action));
+    if (!probeStep) return "";
+    const pos = (probeStep.parameters as Record<string, { nominal?: string } | string> | undefined)?.probe_positive;
+    const neg = (probeStep.parameters as Record<string, { nominal?: string } | string> | undefined)?.probe_negative;
+    const parts = [pos, neg].filter(Boolean).map((v) => (typeof v === "object" ? JSON.stringify(v) : v));
+    return parts.length
+      ? `Locate ${parts.join(" and ")} on the board, and the tip of the multimeter probe`
+      : `Locate the target component and the tip of the multimeter probe`;
+  })();
+
+  // Collect all reference images from search results
+  const referenceImages = (result?.search_results ?? []).flatMap((sr) =>
+    (sr.extracted_info?.relevant_images ?? []).map((img) => {
+      const imgName = img.split("/").pop() ?? img;
+      return {
+        doc_name: sr.document_name.replace("_parsed", ""),
+        image_name: imgName.endsWith(".png") ? imgName : imgName + ".png",
+      };
+    })
+  );
+
+  async function handleRun() {
+    const p = prompt.trim() || defaultPrompt;
+    if (!p) return;
+    setLoading(true);
+    setError("");
+    setKpResult(null);
+    try {
+      const res = await locateKeypoints(p, referenceImages);
+      setKpResult(res);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!result?.task_plan) {
+    return <EmptyState icon={<Camera size={32} />} text="Execute a task first to enable keypoint localisation." />;
+  }
+
+  return (
+    <div className="animate-slide-up space-y-5">
+      {/* Prompt input */}
+      <div className="space-y-2">
+        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Keypoint prompt
+        </label>
+        <textarea
+          className="w-full text-sm border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-teal-400 resize-none"
+          rows={2}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder={defaultPrompt || "e.g. locate the 5V LDO regulator and the multimeter probe tip"}
+        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleRun}
+            disabled={loading}
+            className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+            {loading ? "Capturing & analysing…" : "Locate on Camera"}
+          </button>
+          {referenceImages.length > 0 && (
+            <span className="text-xs text-gray-400">
+              {referenceImages.length} reference image{referenceImages.length !== 1 ? "s" : ""} from docs
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+          {error}
+        </div>
+      )}
+
+      {/* Result */}
+      {kpResult && (
+        <div className="space-y-4">
+          {/* Annotated image */}
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+              Annotated Camera Frame
+            </h4>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`data:image/png;base64,${kpResult.annotated_image}`}
+              alt="Annotated camera frame with keypoints"
+              className="w-full rounded-xl border border-gray-200 object-contain"
+            />
+          </div>
+
+          {/* Keypoint table */}
+          {kpResult.keypoints.length > 0 ? (
+            <div>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                Detected Keypoints ({kpResult.keypoints.length})
+              </h4>
+              <div className="space-y-2">
+                {kpResult.keypoints.map((kp, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50"
+                  >
+                    <span
+                      className="w-3 h-3 rounded-full flex-shrink-0 border-2"
+                      style={{ borderColor: KEYPOINT_COLORS[i % KEYPOINT_COLORS.length], backgroundColor: "black" }}
+                    />
+                    <span className="text-sm font-medium text-gray-800 flex-1">{kp.label}</span>
+                    {kp.pixel && (
+                      <span className="text-xs text-gray-400 font-mono">
+                        px ({kp.pixel[0]}, {kp.pixel[1]})
+                      </span>
+                    )}
+                    <span className="text-xs text-gray-400 font-mono">
+                      norm ({kp.point[1]}, {kp.point[0]})
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-400 text-center py-4">
+              No keypoints detected — try rephrasing the prompt.
+            </div>
+          )}
+
+          {/* Movement description from plan */}
+          {(() => {
+            const steps = result?.task_plan?.task_plan?.steps ?? [];
+            const relevant = steps.filter((s: Step) =>
+              ["PROBE", "MOVE", "MEASURE"].includes(s.action)
+            );
+            if (!relevant.length) return null;
+            return (
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                  Planned Arm Movements
+                </h4>
+                <div className="space-y-2">
+                  {relevant.map((s: Step, i: number) => (
+                    <div key={i} className="flex gap-3 px-4 py-3 rounded-xl border border-teal-100 bg-teal-50">
+                      <span className="text-xs font-bold text-teal-600 uppercase w-16 flex-shrink-0 pt-0.5">
+                        {s.action}
+                      </span>
+                      <span className="text-sm text-gray-700">{s.description}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>
