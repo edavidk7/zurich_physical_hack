@@ -636,10 +636,12 @@ dependencies = [
     { name = "docling" },
     { name = "fastapi" },
     { name = "google-genai" },
+    { name = "pillow" },
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "streamlit" },
     { name = "uvicorn" },
+    { name = "v4l2py" },
 ]
 
 [package.metadata]
@@ -647,10 +649,12 @@ requires-dist = [
     { name = "docling", specifier = ">=2.75.0" },
     { name = "fastapi", specifier = ">=0.134.0" },
     { name = "google-genai", specifier = ">=1.65.0" },
+    { name = "pillow", specifier = ">=10.0.0" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "python-multipart", specifier = ">=0.0.22" },
     { name = "streamlit", specifier = ">=1.54.0" },
     { name = "uvicorn", specifier = ">=0.41.0" },
+    { name = "v4l2py", specifier = ">=1.0.0" },
 ]
 
 [[package]]
@@ -857,6 +861,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/1a/26/57b1034c08922d0aefea79430a5e0006ffaee4f0ec59d566613f667ab2f7/latex2mathml-3.78.1.tar.gz", hash = "sha256:f941db80bf41db33f31df87b304e8b588f8166b813b0257c11c98f7a9d0aac71", size = 74030, upload-time = "2025-08-29T23:34:23.178Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3e/76/d661ea2e529c3d464f9efd73f9ac31626b45279eb4306e684054ea20e3d4/latex2mathml-3.78.1-py3-none-any.whl", hash = "sha256:f089b6d75e85b937f99693c93e8c16c0804008672c3dd2a3d25affd36f238100", size = 73892, upload-time = "2025-08-29T23:34:21.98Z" },
+]
+
+[[package]]
+name = "linuxpy"
+version = "0.24.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/f7/66d76bb3099bce8a952e6114e654d1199d7a02aec90a300294919bd17f77/linuxpy-0.24.0.tar.gz", hash = "sha256:2b44434d28d49257e859a4830267a25aa4b51b1d229f95f79d025ae7f1a5d30e", size = 451602, upload-time = "2026-02-19T14:13:50.47Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/d8/6ce2855fda8123ff7d127821743de7aa1609cda025183b9c4046d5b36205/linuxpy-0.24.0-py3-none-any.whl", hash = "sha256:4e2ce8da45a7a7171bcdcf6b7ab53858d9a83108e24874bd9ddb50a73590a1c6", size = 453120, upload-time = "2026-02-19T14:13:47.686Z" },
 ]
 
 [[package]]
@@ -3104,6 +3120,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/32/ce/eeb58ae4ac36fe09e3842eb02e0eb676bf2c53ae062b98f1b2531673efdd/uvicorn-0.41.0.tar.gz", hash = "sha256:09d11cf7008da33113824ee5a1c6422d89fbc2ff476540d69a34c87fab8b571a", size = 82633, upload-time = "2026-02-16T23:07:24.1Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/83/e4/d04a086285c20886c0daad0e026f250869201013d18f81d9ff5eada73a88/uvicorn-0.41.0-py3-none-any.whl", hash = "sha256:29e35b1d2c36a04b9e180d4007ede3bcb32a85fbdfd6c6aeb3f26839de088187", size = 68783, upload-time = "2026-02-16T23:07:22.357Z" },
+]
+
+[[package]]
+name = "v4l2py"
+version = "3.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "linuxpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d8/b9/a578b5e7e24682ade09a0a60e3a312d58617d776f9ec2b72192ccef8e7c5/v4l2py-3.0.0.tar.gz", hash = "sha256:7e83c02f7393da883c791b9b7ba3dd11163b42d15e68dc09b3e3d99a6d75b7a4", size = 24176, upload-time = "2024-03-11T20:52:35.948Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/c5/9b0293f0eb274cb79967571d21e928b0006ad68fadf70d2df715b36d941c/v4l2py-3.0.0-py3-none-any.whl", hash = "sha256:e9e0231116562e2c2dba19befcfa5918ac2a17e48f5eb5983ae2e7bfec2bb5f1", size = 18618, upload-time = "2024-03-11T20:52:24.385Z" },
 ]
 
 [[package]]
