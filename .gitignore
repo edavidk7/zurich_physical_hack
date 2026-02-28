@@ -213,3 +213,6 @@ models/
 data/Hackathon_documents/
 .DS_Store
 data/parsed
+
+# Environment variables (API keys)
+.env

@@ -1,0 +1,140 @@
+{
+  "task_plan": {
+    "id": "verify-arduino-3v3-output",
+    "user_request": "Verify that the 3.3V pin actually outputs 3.3V",
+    "description": "Verify the 3.3V power rail output on the Arduino UNO Q board by measuring voltage at key 3.3V output pins and comparing against specified tolerances.",
+    "confidence_score": 0.95,
+    "equipment": {
+      "robot": "SO-ARM100",
+      "tool": "multimeter probe",
+      "dut": "Arduino UNO Q"
+    },
+    "setup": {
+      "multimeter_mode": "DC_VOLTAGE",
+      "multimeter_range": "auto",
+      "dut_power": "powered",
+      "notes": "Ensure the Arduino UNO Q board is powered on before starting the test."
+    },
+    "steps": [
+      {
+        "step_id": 1,
+        "action": "WAIT",
+        "target": "system",
+        "description": "Allow system to stabilize and ensure DUT is powered.",
+        "parameters": {
+          "duration_seconds": 5
+        },
+        "pass_criteria": "Duration elapsed",
+        "fail_action": "STOP"
+      },
+      {
+        "step_id": 2,
+        "action": "MOVE",
+        "target": "probe_positive",
+        "description": "Move positive probe to the +3V3 OUT pin on the Qwiic header (A4, pin 2).",
+        "parameters": {
+          "pin": "QWIIC1_A4_PIN2"
+        },
+        "pass_criteria": "Probe successfully positioned",
+        "fail_action": "STOP"
+      },
+      {
+        "step_id": 3,
+        "action": "MOVE",
+        "target": "probe_negative",
+        "description": "Move negative probe to a common GND pin on the board.",
+        "parameters": {
+          "pin": "GND_COMMON"
+        },
+        "pass_criteria": "Probe successfully positioned",
+        "fail_action": "STOP"
+      },
+      {
+        "step_id": 4,
+        "action": "MEASURE",
+        "target": "QWIIC1_A4_PIN2",
+        "description": "Measure DC voltage at the +3V3 OUT pin on the Qwiic header.",
+        "parameters": {
+          "measurement_type": "voltage",
+          "expected_value": {
+            "nominal": 3.3,
+            "min": 3.1,
+            "max": 3.5,
+            "unit": "V"
+          },
+          "probe_positive": "QWIIC1_A4_PIN2",
+          "probe_negative": "GND_COMMON"
+        },
+        "pass_criteria": "Measured voltage is between 3.1V and 3.5V (inclusive)",
+        "fail_action": "REPORT"
+      },
+      {
+        "step_id": 5,
+        "action": "REPORT",
+        "target": "measurement_result",
+        "description": "Report the measured voltage for QWIIC1_A4_PIN2.",
+        "parameters": {},
+        "pass_criteria": "Report generated",
+        "fail_action": "STOP"
+      },
+      {
+        "step_id": 6,
+        "action": "WAIT",
+        "target": "system",
+        "description": "Wait briefly before moving to the next pin.",
+        "parameters": {
+          "duration_seconds": 2
+        },
+        "pass_criteria": "Duration elapsed",
+        "fail_action": "STOP"
+      },
+      {
+        "step_id": 7,
+        "action": "MOVE",
+        "target": "probe_positive",
+        "description": "Move positive probe to the IOREF pin on the JANALOG header (A3, pin 2).",
+        "parameters": {
+          "pin": "JANALOG1_A3_PIN2"
+        },
+        "pass_criteria": "Probe successfully positioned",
+        "fail_action": "STOP"
+      },
+      {
+        "step_id": 8,
+        "action": "MEASURE",
+        "target": "JANALOG1_A3_PIN2",
+        "description": "Measure DC voltage at the IOREF pin on the JANALOG header.",
+        "parameters": {
+          "measurement_type": "voltage",
+          "expected_value": {
+            "nominal": 3.3,
+            "min": 3.1,
+            "max": 3.5,
+            "unit": "V"
+          },
+          "probe_positive": "JANALOG1_A3_PIN2",
+          "probe_negative": "GND_COMMON"
+        },
+        "pass_criteria": "Measured voltage is between 3.1V and 3.5V (inclusive)",
+        "fail_action": "REPORT"
+      },
+      {
+        "step_id": 9,
+        "action": "REPORT",
+        "target": "measurement_result",
+        "description": "Report the measured voltage for JANALOG1_A3_PIN2.",
+        "parameters": {},
+        "pass_criteria": "Report generated",
+        "fail_action": "STOP"
+      }
+    ],
+    "summary": {
+      "total_steps": 9,
+      "estimated_duration_seconds": 120,
+      "critical_checks": [
+        "Voltage at QWIIC1_A4_PIN2 (+3V3 OUT) is within 3.1V - 3.5V",
+        "Voltage at JANALOG1_A3_PIN2 (IOREF) is within 3.1V - 3.5V"
+      ]
+    }
+  }
+}
