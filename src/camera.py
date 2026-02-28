@@ -156,6 +156,10 @@ class _OpenCVCameraCapture(_BaseCameraCapture):
         if self._cap is None:
             self.open()
         assert self._cap is not None
+        # Flush the internal buffer so we get the latest frame,
+        # not a stale one queued by DirectShow / the driver.
+        for _ in range(2):
+            self._cap.grab()
         ret, frame = self._cap.read()
         if not ret:
             raise RuntimeError("Failed to read frame from camera")

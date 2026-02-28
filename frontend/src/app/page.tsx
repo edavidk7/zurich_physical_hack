@@ -33,6 +33,13 @@ import {
   Maximize2,
   Minimize2,
   Download,
+  Crosshair,
+  RotateCcw,
+  Move3d,
+  Plug,
+  Unplug,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 
 import {
@@ -43,7 +50,16 @@ import {
   chatWithAgent,
   executeOnRobot,
   getDocumentContent,
+  forwardKinematics,
+  inverseKinematics,
+  getHomePosition,
+  motorConnect,
+  motorDisconnect,
+  motorStatus,
+  motorMove,
+  motorSetSpeed,
 } from "@/lib/api";
+import type { EEPosition, IKResult } from "@/lib/api";
 
 import type {
   DocumentsResponse,
@@ -59,7 +75,7 @@ import type {
 // ===========================================================================
 
 export default function Home() {
-  const [page, setPage] = useState<"task" | "kb" | "agent">("task");
+  const [page, setPage] = useState<"task" | "kb" | "agent" | "ik">("task");
   const [docs, setDocs] = useState<DocumentsResponse | null>(null);
   const [result, setResult] = useState<ExecuteResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -215,6 +231,7 @@ export default function Home() {
           <NavItem icon={<Zap size={18} />} label="Task" active={page === "task"} onClick={() => setPage("task")} />
           <NavItem icon={<BookOpen size={18} />} label="Knowledge Base" active={page === "kb"} onClick={() => setPage("kb")} />
           <NavItem icon={<MessageSquare size={18} />} label="AI Agent" active={page === "agent"} onClick={() => setPage("agent")} />
+          <NavItem icon={<Move3d size={18} />} label="Arm Control" active={page === "ik"} onClick={() => setPage("ik")} />
         </nav>
 
         <div className="px-5 pb-5">
@@ -227,7 +244,7 @@ export default function Home() {
         {/* Top bar */}
         <header className="h-12 flex items-center justify-between px-6 border-b border-gray-200 bg-white flex-shrink-0">
           <span className="text-sm font-semibold text-gray-800">
-            {page === "task" ? "⚙️ Task Execution" : page === "agent" ? "🤖 AI Agent" : "📚 Knowledge Base"}
+            {page === "task" ? "⚙️ Task Execution" : page === "agent" ? "🤖 AI Agent" : page === "ik" ? "🦾 Arm Control" : "📚 Knowledge Base"}
           </span>
           <div className="flex items-center gap-5 text-xs text-gray-400">
             <span className="flex items-center gap-1.5">
@@ -264,6 +281,8 @@ export default function Home() {
             />
           ) : page === "agent" ? (
             <AgentPage docs={docs} />
+          ) : page === "ik" ? (
+            <IKPage />
           ) : (
             <KBPage docs={docs} onUpload={handleUpload} />
           )}
@@ -932,6 +951,498 @@ function JsonTab({ result }: { result: ExecuteResult | null }) {
           </pre>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ========================================================================= */
+/* Arm Control (IK/FK) Page                                                  */
+/* ========================================================================= */
+
+const JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
+const HOME_JOINTS = [0, -90, 90, 90, -90, 90];
+
+function IKPage() {
+  const [joints, setJoints] = useState<number[]>(HOME_JOINTS);
+  const [ee, setEE] = useState<EEPosition | null>(null);
+  const [targetX, setTargetX] = useState("0.0");
+  const [targetY, setTargetY] = useState("-0.2");
+  const [targetZ, setTargetZ] = useState("0.15");
+  const [useOrientation, setUseOrientation] = useState(false);
+  const [targetRoll, setTargetRoll] = useState("90");
+  const [targetPitch, setTargetPitch] = useState("0");
+  const [targetYaw, setTargetYaw] = useState("0");
+  const [ikResult, setIkResult] = useState<IKResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [violations, setViolations] = useState<string[]>([]);
+  const [mode, setMode] = useState<"fk" | "ik">("fk");
+
+  // Motor connection state
+  const [robotConnected, setRobotConnected] = useState(false);
+  const [robotPort, setRobotPort] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendStatus, setSendStatus] = useState<string | null>(null);
+  const [livePositions, setLivePositions] = useState<Record<string, number> | null>(null);
+  const [robotSpeed, setRobotSpeed] = useState(100); // 0-1000 (default 100 = slow & safe)
+
+  // Check robot connection on mount & poll status
+  useEffect(() => {
+    const checkStatus = async () => {
+      try {
+        const s = await motorStatus();
+        setRobotConnected(s.connected);
+        setRobotPort(s.port);
+        if (s.connected && s.positions_deg) {
+          setLivePositions(s.positions_deg);
+        }
+      } catch { /* ignore */ }
+    };
+    checkStatus();
+    const interval = setInterval(checkStatus, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Load home position on mount
+  useEffect(() => {
+    getHomePosition().then((home) => {
+      setJoints(home.joints_deg);
+      setEE(home.ee_position);
+      setTargetX(home.ee_position.x.toFixed(4));
+      setTargetY(home.ee_position.y.toFixed(4));
+      setTargetZ(home.ee_position.z.toFixed(4));
+      setTargetRoll(home.ee_position.roll.toFixed(1));
+      setTargetPitch(home.ee_position.pitch.toFixed(1));
+      setTargetYaw(home.ee_position.yaw.toFixed(1));
+    }).catch(() => {});
+  }, []);
+
+  const runFK = async (j?: number[]) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await forwardKinematics(j ?? joints);
+      setEE(res.ee_position);
+      setViolations(res.joint_violations);
+      setTargetX(res.ee_position.x.toFixed(4));
+      setTargetY(res.ee_position.y.toFixed(4));
+      setTargetZ(res.ee_position.z.toFixed(4));
+      setTargetRoll(res.ee_position.roll.toFixed(1));
+      setTargetPitch(res.ee_position.pitch.toFixed(1));
+      setTargetYaw(res.ee_position.yaw.toFixed(1));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "FK failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runIK = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params: Parameters<typeof inverseKinematics>[0] = {
+        x: parseFloat(targetX),
+        y: parseFloat(targetY),
+        z: parseFloat(targetZ),
+        init_joints_deg: joints,
+      };
+      if (useOrientation) {
+        params.roll = parseFloat(targetRoll);
+        params.pitch = parseFloat(targetPitch);
+        params.yaw = parseFloat(targetYaw);
+      }
+      const res = await inverseKinematics(params);
+      setIkResult(res);
+      setJoints(res.joints_deg);
+      setEE(res.ee_position);
+      setViolations(res.joint_violations);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "IK failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const goHome = () => {
+    setJoints(HOME_JOINTS);
+    setIkResult(null);
+    runFK(HOME_JOINTS);
+  };
+
+  const updateJoint = (idx: number, val: number) => {
+    const next = [...joints];
+    next[idx] = val;
+    setJoints(next);
+  };
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    setError(null);
+    try {
+      const res = await motorConnect();
+      setRobotConnected(true);
+      setRobotPort(res.port);
+      setSendStatus(`Connected on ${res.port}`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Connection failed");
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setConnecting(true);
+    try {
+      await motorDisconnect();
+      setRobotConnected(false);
+      setRobotPort(null);
+      setLivePositions(null);
+      setSendStatus("Disconnected");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Disconnect failed");
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleSendToRobot = async () => {
+    setSending(true);
+    setSendStatus(null);
+    setError(null);
+    try {
+      const res = await motorMove(joints, robotSpeed);
+      setSendStatus(`Sent to ${res.motors_moved.length} motors`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to send to robot");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleReadFromRobot = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const s = await motorStatus();
+      if (s.positions_list && s.positions_list.length === 6) {
+        setJoints(s.positions_list);
+        setLivePositions(s.positions_deg);
+        await runFK(s.positions_list);
+        setSendStatus("Read positions from robot");
+      } else {
+        setError("Could not read positions");
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Read failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto space-y-6">
+      {/* Mode toggle */}
+      <div className="flex items-center gap-3">
+        <div className="inline-flex rounded-lg bg-gray-100 p-1">
+          <button
+            onClick={() => setMode("fk")}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+              mode === "fk" ? "bg-white text-teal-700 shadow-sm" : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Forward Kinematics
+          </button>
+          <button
+            onClick={() => setMode("ik")}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+              mode === "ik" ? "bg-white text-teal-700 shadow-sm" : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Inverse Kinematics
+          </button>
+        </div>
+        <button
+          onClick={goHome}
+          className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-500 hover:text-teal-600 hover:bg-teal-50 rounded-lg transition-colors"
+        >
+          <RotateCcw size={14} /> Home Position
+        </button>
+      </div>
+
+      {/* Robot connection bar */}
+      <div className={`flex items-center justify-between p-3 rounded-xl border shadow-sm ${
+        robotConnected ? "bg-emerald-50 border-emerald-200" : "bg-gray-50 border-gray-200"
+      }`}>
+        <div className="flex items-center gap-3">
+          {robotConnected ? (
+            <Wifi size={16} className="text-emerald-600" />
+          ) : (
+            <WifiOff size={16} className="text-gray-400" />
+          )}
+          <span className={`text-sm font-medium ${robotConnected ? "text-emerald-700" : "text-gray-500"}`}>
+            {robotConnected ? `Robot connected on ${robotPort}` : "Robot not connected"}
+          </span>
+          {livePositions && robotConnected && (
+            <span className="text-xs text-gray-400 ml-2">
+              Live: [{Object.values(livePositions).map(v => v.toFixed(0)).join(", ")}]°
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {robotConnected && (
+            <>
+              <button
+                onClick={handleReadFromRobot}
+                disabled={loading}
+                className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-1.5"
+              >
+                <Download size={12} /> Read
+              </button>
+              <div className="flex items-center gap-2 px-2 py-1 bg-gray-50 rounded-lg border border-gray-200">
+                <span className="text-[10px] font-medium text-gray-500 whitespace-nowrap">Speed</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1000}
+                  value={robotSpeed}
+                  onChange={e => {
+                    const v = Number(e.target.value);
+                    setRobotSpeed(v);
+                    motorSetSpeed(v).catch(() => {});
+                  }}
+                  className="w-20 h-1 accent-[#37e0d8] cursor-pointer"
+                />
+                <span className="text-[10px] font-mono text-gray-600 w-7 text-right">{robotSpeed}</span>
+              </div>
+              <button
+                onClick={handleSendToRobot}
+                disabled={sending}
+                className="px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-colors flex items-center gap-1.5"
+                style={{ background: sending ? "#9ca3af" : "#37e0d8" }}
+              >
+                {sending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+                Send to Robot
+              </button>
+            </>
+          )}
+          <button
+            onClick={robotConnected ? handleDisconnect : handleConnect}
+            disabled={connecting}
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 ${
+              robotConnected
+                ? "text-red-600 bg-white border border-red-200 hover:bg-red-50"
+                : "text-white"
+            }`}
+            style={!robotConnected ? { background: connecting ? "#9ca3af" : "#37e0d8" } : undefined}
+          >
+            {connecting ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : robotConnected ? (
+              <Unplug size={12} />
+            ) : (
+              <Plug size={12} />
+            )}
+            {robotConnected ? "Disconnect" : "Connect"}
+          </button>
+        </div>
+      </div>
+      {sendStatus && (
+        <div className="flex items-center gap-2 p-2 text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded-lg">
+          <CheckCircle2 size={14} /> {sendStatus}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Left: Joint angles panel */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+              <Gauge size={16} className="text-teal-500" /> Joint Angles
+            </h3>
+            {mode === "fk" && (
+              <button
+                onClick={() => runFK()}
+                disabled={loading}
+                className="px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-colors flex items-center gap-1.5"
+                style={{ background: loading ? "#9ca3af" : "#37e0d8" }}
+              >
+                {loading ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+                Compute FK
+              </button>
+            )}
+          </div>
+          <div className="p-4 space-y-3">
+            {JOINT_NAMES.map((name, i) => (
+              <div key={name} className="flex items-center gap-3">
+                <label className="text-xs font-mono text-gray-500 w-28 truncate">{name}</label>
+                <input
+                  type="range"
+                  min={-180}
+                  max={180}
+                  step={0.5}
+                  value={joints[i] ?? 0}
+                  onChange={(e) => updateJoint(i, parseFloat(e.target.value))}
+                  className="flex-1 h-1.5 accent-teal-500"
+                />
+                <input
+                  type="number"
+                  step={1}
+                  value={joints[i]?.toFixed(1) ?? "0"}
+                  onChange={(e) => updateJoint(i, parseFloat(e.target.value) || 0)}
+                  className="w-20 px-2 py-1 text-xs font-mono border border-gray-200 rounded text-right"
+                />
+                <span className="text-[10px] text-gray-400 w-4">deg</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Right: End-effector panel */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+              <Crosshair size={16} className="text-teal-500" /> End-Effector Position
+            </h3>
+            {mode === "ik" && (
+              <button
+                onClick={runIK}
+                disabled={loading}
+                className="px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-colors flex items-center gap-1.5"
+                style={{ background: loading ? "#9ca3af" : "#37e0d8" }}
+              >
+                {loading ? <Loader2 size={12} className="animate-spin" /> : <Crosshair size={12} />}
+                Solve IK
+              </button>
+            )}
+          </div>
+          <div className="p-4 space-y-4">
+            {/* Position */}
+            <div>
+              <p className="text-xs font-medium text-gray-500 mb-2">Position (metres)</p>
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: "X", val: targetX, set: setTargetX },
+                  { label: "Y", val: targetY, set: setTargetY },
+                  { label: "Z", val: targetZ, set: setTargetZ },
+                ].map(({ label, val, set }) => (
+                  <div key={label}>
+                    <label className="text-[10px] text-gray-400 uppercase tracking-wider">{label}</label>
+                    <input
+                      type="number"
+                      step={0.01}
+                      value={val}
+                      onChange={(e) => set(e.target.value)}
+                      disabled={mode === "fk"}
+                      className="w-full mt-0.5 px-2 py-1.5 text-sm font-mono border border-gray-200 rounded focus:ring-1 focus:ring-teal-400 focus:border-teal-400 disabled:bg-gray-50"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+            {/* Orientation */}
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <p className="text-xs font-medium text-gray-500">Orientation (degrees)</p>
+                {mode === "ik" && (
+                  <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useOrientation}
+                      onChange={(e) => setUseOrientation(e.target.checked)}
+                      className="w-3.5 h-3.5 accent-teal-500"
+                    />
+                    Track orientation
+                  </label>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: "Roll", val: targetRoll, set: setTargetRoll },
+                  { label: "Pitch", val: targetPitch, set: setTargetPitch },
+                  { label: "Yaw", val: targetYaw, set: setTargetYaw },
+                ].map(({ label, val, set }) => (
+                  <div key={label}>
+                    <label className="text-[10px] text-gray-400 uppercase tracking-wider">{label}</label>
+                    <input
+                      type="number"
+                      step={1}
+                      value={val}
+                      onChange={(e) => set(e.target.value)}
+                      disabled={mode === "fk" || (mode === "ik" && !useOrientation)}
+                      className="w-full mt-0.5 px-2 py-1.5 text-sm font-mono border border-gray-200 rounded focus:ring-1 focus:ring-teal-400 focus:border-teal-400 disabled:bg-gray-50"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Current EE readout */}
+            {ee && (
+              <div className="mt-3 p-3 rounded-lg bg-gray-50 border border-gray-100">
+                <p className="text-[10px] font-medium text-gray-400 uppercase tracking-wider mb-1.5">Current End-Effector</p>
+                <div className="grid grid-cols-3 gap-2 text-xs font-mono text-gray-700">
+                  <span>x: {ee.x.toFixed(4)} m</span>
+                  <span>y: {ee.y.toFixed(4)} m</span>
+                  <span>z: {ee.z.toFixed(4)} m</span>
+                  <span>roll: {ee.roll.toFixed(1)}&deg;</span>
+                  <span>pitch: {ee.pitch.toFixed(1)}&deg;</span>
+                  <span>yaw: {ee.yaw.toFixed(1)}&deg;</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Status bar */}
+      {(error || (ikResult && mode === "ik") || violations.length > 0) && (
+        <div className="space-y-2">
+          {error && (
+            <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+              <XCircle size={16} /> {error}
+            </div>
+          )}
+          {ikResult && mode === "ik" && (
+            <div
+              className={`flex items-center gap-2 p-3 rounded-lg border text-sm ${
+                ikResult.success
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                  : "bg-amber-50 border-amber-200 text-amber-700"
+              }`}
+            >
+              {ikResult.success ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+              IK {ikResult.success ? "converged" : "did not converge"} — position error: {ikResult.error_mm.toFixed(3)} mm
+            </div>
+          )}
+          {violations.length > 0 && (
+            <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
+              <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="font-medium">Joint limit violations:</p>
+                <ul className="mt-1 list-disc list-inside text-xs">
+                  {violations.map((v, i) => (
+                    <li key={i}>{v}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Camera feed */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-gray-100">
+          <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+            <Camera size={16} className="text-teal-500" /> Robot Camera
+          </h3>
+        </div>
+        <div className="p-4">
+          <CameraFeed />
+        </div>
+      </div>
     </div>
   );
 }

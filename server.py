@@ -19,6 +19,8 @@ from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel
 
 from src.camera import CameraCapture, CameraConfig
+from src.kinematics import get_kinematics
+from src.motor_control import get_motor_controller, find_robot_port
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -79,6 +81,13 @@ def _close_camera():
 async def lifespan(app: FastAPI):
     yield
     _close_camera()
+    # Disconnect robot if connected
+    try:
+        ctrl = get_motor_controller()
+        if ctrl.is_connected:
+            ctrl.disconnect()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="DocOps API", version="0.1.0", lifespan=lifespan)
@@ -494,20 +503,205 @@ async def robot_status():
 
 
 # ---------------------------------------------------------------------------
+# Routes — Kinematics (FK / IK)
+# ---------------------------------------------------------------------------
+
+class FKRequest(BaseModel):
+    joints_deg: list[float]  # 6 values: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
+
+class IKRequest(BaseModel):
+    x: float
+    y: float
+    z: float
+    roll: Optional[float] = None   # degrees, optional
+    pitch: Optional[float] = None
+    yaw: Optional[float] = None
+    init_joints_deg: Optional[list[float]] = None  # 6 values, optional initial guess
+    gripper_deg: float = 0.0
+
+@app.post("/api/kinematics/fk")
+async def forward_kinematics(req: FKRequest):
+    """Compute end-effector pose from joint angles (degrees)."""
+    import numpy as np
+    kin = get_kinematics()
+    q_rad = np.deg2rad(req.joints_deg)
+    ee = kin.get_ee_position(q_rad)
+    violations = kin.check_joint_limits(q_rad)
+    return {
+        "ee_position": ee,
+        "joint_violations": violations,
+    }
+
+@app.post("/api/kinematics/ik")
+async def inverse_kinematics(req: IKRequest):
+    """Compute joint angles to reach a target end-effector position."""
+    import numpy as np
+    kin = get_kinematics()
+    rpy = None
+    if req.roll is not None and req.pitch is not None and req.yaw is not None:
+        rpy = (req.roll, req.pitch, req.yaw)
+    init = np.deg2rad(req.init_joints_deg) if req.init_joints_deg else None
+    result = kin.inverse_kinematics(
+        target_xyz=(req.x, req.y, req.z),
+        target_rpy_deg=rpy,
+        q_init_mech=init,
+        gripper=np.deg2rad(req.gripper_deg),
+    )
+    violations = kin.check_joint_limits(np.array(result["joints_rad"]))
+    result["joint_violations"] = violations
+    return result
+
+@app.get("/api/kinematics/home")
+async def kinematics_home():
+    """Return the home pose joint angles and corresponding EE position."""
+    import numpy as np
+    kin = get_kinematics()
+    q_home_deg = [0.0, -90.0, 90.0, 90.0, -90.0, 90.0]
+    q_home_rad = np.deg2rad(q_home_deg)
+    ee = kin.get_ee_position(q_home_rad)
+    return {
+        "joints_deg": q_home_deg,
+        "joint_names": kin.model.motor_names,
+        "ee_position": ee,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Routes — Motor Control (direct servo control)
+# ---------------------------------------------------------------------------
+
+class MotorConnectRequest(BaseModel):
+    port: Optional[str] = None  # auto-detect if None
+
+class MotorWriteRequest(BaseModel):
+    joints_deg: list[float]  # 6 values: shoulder_pan → gripper
+    speed: Optional[int] = None  # 0-1000 (0=slowest, 100=moderate, 1000=max)
+
+class MotorSpeedRequest(BaseModel):
+    speed: int  # 0-1000
+
+@app.post("/api/motor/connect")
+async def motor_connect(req: MotorConnectRequest):
+    """Connect to the SO-ARM100 robot on the given serial port."""
+    port = req.port
+    if not port:
+        port = find_robot_port()
+        if not port:
+            raise HTTPException(400, "No robot serial port detected. Specify port manually.")
+    ctrl = get_motor_controller()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, ctrl.connect, port)
+    if result.get("status") == "error":
+        raise HTTPException(500, result.get("error", "Connection failed"))
+    return result
+
+@app.post("/api/motor/disconnect")
+async def motor_disconnect():
+    """Disconnect from the robot, disabling torque."""
+    ctrl = get_motor_controller()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, ctrl.disconnect)
+    return result
+
+@app.get("/api/motor/status")
+async def motor_status():
+    """Get the current motor connection and position status."""
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        return {"connected": False, "port": None, "positions_deg": None}
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, ctrl.read_positions)
+    return {
+        "connected": True,
+        "port": ctrl._port,
+        "positions_deg": result.get("positions_deg"),
+        "positions_list": result.get("positions_list"),
+        "error": result.get("error"),
+    }
+
+@app.get("/api/motor/positions")
+async def motor_read_positions():
+    """Read current joint positions from the robot."""
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected. Call /api/motor/connect first.")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, ctrl.read_positions)
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    return result
+
+@app.post("/api/motor/move")
+async def motor_write_positions(req: MotorWriteRequest):
+    """Send goal positions to the robot motors.
+
+    Accepts 6 joint angles in degrees: shoulder_pan, shoulder_lift,
+    elbow_flex, wrist_flex, wrist_roll, gripper.
+    Optionally set speed (0-1000).
+    """
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected. Call /api/motor/connect first.")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, ctrl.write_joint_array, req.joints_deg, req.speed
+    )
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    return result
+
+@app.post("/api/motor/torque/enable")
+async def motor_enable_torque():
+    """Enable torque on all motors."""
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected.")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, ctrl.enable_torque)
+    return result
+
+@app.post("/api/motor/speed")
+async def motor_set_speed(req: MotorSpeedRequest):
+    """Set the movement speed (0=slowest, 100=moderate, 1000=max)."""
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected.")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, ctrl.set_speed, req.speed)
+    return result
+
+@app.post("/api/motor/torque/disable")
+async def motor_disable_torque():
+    """Disable torque — arm goes limp."""
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected.")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, ctrl.disable_torque)
+    return result
+
+@app.get("/api/motor/detect-port")
+async def motor_detect_port():
+    """Auto-detect the robot serial port."""
+    port = find_robot_port()
+    return {"port": port, "detected": port is not None}
+
+
+# ---------------------------------------------------------------------------
 # Routes — Camera
 # ---------------------------------------------------------------------------
 
 @app.get("/api/camera/frame")
 async def camera_frame():
-    """Return a single JPEG snapshot from the robot camera."""
+    """Return a single JPEG snapshot from the robot camera (always fresh)."""
     try:
-        # Return the cached latest frame if available (from the stream),
-        # otherwise capture a fresh one
-        if _latest_frame is not None:
-            return Response(content=_latest_frame, media_type="image/jpeg")
         loop = asyncio.get_event_loop()
         jpeg = await loop.run_in_executor(None, _capture_frame)
-        return Response(content=jpeg, media_type="image/jpeg")
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
     except Exception as e:
         raise HTTPException(500, f"Camera error: {e}")
 
@@ -533,6 +727,7 @@ async def camera_stream():
     return StreamingResponse(
         generate(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 
 
