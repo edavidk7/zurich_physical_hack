@@ -2,9 +2,9 @@
 
 > Documents don't just get read. They get run.
 
-DocOps is an automated test & verification platform that parses factory documents (datasheets, SOPs, manuals) using **Docling**, finds relevant specifications via **Gemini AI**, and generates executable task plans for an **SO-ARM100** robotic arm.
+**Built for the IBM Docling Challenge** at the Zurich Physical AI Hackathon by **Golden Grippers**.
 
-Built at the Zurich Physical AI Hackathon by **Golden Grippers**.
+DocOps is a document-to-execution compiler that turns real factory documents — datasheets, SOPs, maintenance manuals — into structured, machine-executable task plans. At its core, **[IBM Docling](https://github.com/DS4SD/docling)** powers the document understanding layer: parsing complex PDFs with AI-driven layout analysis, extracting tables, figures, formulas, and converting them into structured markdown that downstream agents can reason over. Combined with **Gemini AI** for specification search and task planning, the pipeline drives an **SO-ARM100** robotic arm to physically execute what's written in the documents.
 
 <p align="center">
   <img src="data/images/logo.png" alt="Golden Grippers Logo" width="200" />
