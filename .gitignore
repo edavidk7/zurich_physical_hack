@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Golden Grippers - local models (large files)
+models/
+
+# Parsed output (regeneratable)
+data/parsed/

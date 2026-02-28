@@ -1,7 +1,9 @@
 [project]
-name = "zurich-physical-hack"
+name = "golden-grippers"
 version = "0.1.0"
-description = "Add your description here"
+description = "Document-to-Execution Pipeline"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "docling>=2.75.0",
+]
