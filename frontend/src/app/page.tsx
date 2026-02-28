@@ -32,6 +32,7 @@ import {
   Sparkles,
   Maximize2,
   Minimize2,
+  Download,
 } from "lucide-react";
 
 import {
@@ -593,9 +594,30 @@ function RobotPanel({ status }: { status: string }) {
 }
 
 function CameraFeed() {
-  const streamUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/camera/stream`;
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const streamUrl = `${apiBase}/api/camera/stream`;
+  const frameUrl = `${apiBase}/api/camera/frame`;
   const [error, setError] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+
+  const captureSnapshot = async () => {
+    setCapturing(true);
+    try {
+      const res = await fetch(frameUrl);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `robot-capture-${Date.now()}.jpg`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* ignore */
+    } finally {
+      setCapturing(false);
+    }
+  };
 
   const feed = (
     <div className={`rounded-xl overflow-hidden border-2 border-gray-800 bg-gray-900 aspect-video flex items-center justify-center relative ${expanded ? "w-full h-full rounded-none border-0" : ""}`}>
@@ -603,13 +625,23 @@ function CameraFeed() {
         <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse-dot" />
         LIVE — CAM 1
       </div>
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="absolute top-2 right-3 z-10 p-1 rounded bg-black/50 text-gray-400 hover:text-white hover:bg-black/70 transition-colors cursor-pointer"
-        title={expanded ? "Minimize" : "Expand"}
-      >
-        {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-      </button>
+      <div className="absolute top-2 right-3 z-10 flex items-center gap-1">
+        <button
+          onClick={captureSnapshot}
+          disabled={capturing || error}
+          className="p-1 rounded bg-black/50 text-gray-400 hover:text-white hover:bg-black/70 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Capture snapshot"
+        >
+          {capturing ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+        </button>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="p-1 rounded bg-black/50 text-gray-400 hover:text-white hover:bg-black/70 transition-colors cursor-pointer"
+          title={expanded ? "Minimize" : "Expand"}
+        >
+          {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+        </button>
+      </div>
       {error ? (
         <span className="text-gray-600 text-sm flex items-center gap-1.5"><Camera size={16} /> Camera offline</span>
       ) : (
@@ -846,8 +878,13 @@ function SourceCard({ result }: { result: SearchResult }) {
           <div>
             <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Relevant Diagrams</h4>
             <div className="grid grid-cols-3 gap-2">
-              {info.relevant_images.map((img, j) => {
+              {info.relevant_images.map((img: string, j: number) => {
+                // Extract just the filename — handle formats like:
+                // "image_3.png", "arduino_uno_images/image_3.png",
+                // "image_3.png — description text", "image_3"
                 let imgName = img.split("/").pop() ?? img;
+                // Strip anything after the filename (e.g. " — description")
+                imgName = imgName.replace(/\s*[—–-]\s.*$/, "").trim();
                 if (!imgName.endsWith(".png")) imgName += ".png";
                 const clean = result.document_name.replace("_parsed", "");
                 return (
@@ -856,7 +893,7 @@ function SourceCard({ result }: { result: SearchResult }) {
                     key={j}
                     src={imageUrl(clean, imgName)}
                     alt={imgName}
-                    className="rounded-lg border border-gray-200 w-full object-contain"
+                    className="rounded-lg border border-gray-200 w-full object-contain bg-white p-1"
                     onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                   />
                 );

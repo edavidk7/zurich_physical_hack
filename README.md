@@ -6,6 +6,11 @@ DocOps is an automated test & verification platform that parses factory document
 
 Built at the Zurich Physical AI Hackathon by **Golden Grippers**.
 
+<p align="center">
+  <img src="data/images/logo.png" alt="Golden Grippers Logo" width="200" />
+</p>
+
+
 ## Architecture
 
 | Layer | Stack | Description |

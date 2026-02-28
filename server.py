@@ -40,6 +40,7 @@ for d in (PARSED_DIR, PLANS_DIR, UPLOAD_DIR):
 # Camera singleton — keeps the camera open for fast frame access
 _camera_lock = threading.Lock()
 _camera = None
+_latest_frame: bytes | None = None  # cached latest JPEG for snapshot
 
 CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", "1"))
 
@@ -53,6 +54,16 @@ def _get_camera():
                 _camera = CameraCapture(cfg)
                 _camera.open()
     return _camera
+
+
+def _capture_frame() -> bytes:
+    """Thread-safe frame capture. Updates the cached latest frame."""
+    global _latest_frame
+    cam = _get_camera()
+    with _camera_lock:
+        jpeg = cam.capture_jpeg()
+    _latest_frame = jpeg
+    return jpeg
 
 
 def _close_camera():
@@ -490,9 +501,12 @@ async def robot_status():
 async def camera_frame():
     """Return a single JPEG snapshot from the robot camera."""
     try:
-        cam = _get_camera()
+        # Return the cached latest frame if available (from the stream),
+        # otherwise capture a fresh one
+        if _latest_frame is not None:
+            return Response(content=_latest_frame, media_type="image/jpeg")
         loop = asyncio.get_event_loop()
-        jpeg = await loop.run_in_executor(None, cam.capture_jpeg)
+        jpeg = await loop.run_in_executor(None, _capture_frame)
         return Response(content=jpeg, media_type="image/jpeg")
     except Exception as e:
         raise HTTPException(500, f"Camera error: {e}")
@@ -502,11 +516,10 @@ async def camera_frame():
 async def camera_stream():
     """MJPEG stream from the robot camera for live feed."""
     async def generate():
-        cam = _get_camera()
         loop = asyncio.get_event_loop()
         while True:
             try:
-                jpeg = await loop.run_in_executor(None, cam.capture_jpeg)
+                jpeg = await loop.run_in_executor(None, _capture_frame)
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n"

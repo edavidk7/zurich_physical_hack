@@ -99,9 +99,8 @@ Output ONLY valid JSON:
     ],
     "additional_context": "any other relevant info from the document",
     "relevant_images": [
-      "image_N.png — list the image filenames (e.g. image_3.png) that appear \
-near sections relevant to the user's task. Look for ![Image](...) references \
-in the document and include only those near relevant specs, pinouts, or diagrams."
+      "image_1.png",
+      "image_3.png"
     ]
   }
 }
