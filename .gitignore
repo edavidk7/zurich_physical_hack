@@ -209,5 +209,5 @@ __marimo__/
 # Golden Grippers - local models (large files)
 models/
 
-# Parsed output (regeneratable)
-data/parsed/
+# Hackathon documents (too large for git)
+data/Hackathon_documents/
