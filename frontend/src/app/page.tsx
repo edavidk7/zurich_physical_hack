@@ -84,7 +84,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [taskInput, setTaskInput] = useState("");
-  const [activeTab, setActiveTab] = useState<"plan" | "sources" | "json">("plan");
+  const [activeTab, setActiveTab] = useState<"plan" | "sources" | "json" | "keypoints">("plan");
   const [robotStatus, setRobotStatus] = useState<"idle" | "running" | "complete" | "error">("idle");
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [pipelineStages, setPipelineStages] = useState<{ message: string; status: "pending" | "active" | "done" | "error"; icon?: string }[]>([]);
@@ -332,8 +332,8 @@ function TaskPage({
   loading: boolean;
   statusMessage: string;
   result: ExecuteResult | null;
-  activeTab: "plan" | "sources" | "json";
-  setActiveTab: (v: "plan" | "sources" | "json") => void;
+  activeTab: "plan" | "sources" | "json" | "keypoints";
+  setActiveTab: (v: "plan" | "sources" | "json" | "keypoints") => void;
   robotStatus: string;
   setRobotStatus: (s: "idle" | "running" | "complete" | "error") => void;
   onExecute: () => void;
@@ -509,6 +509,7 @@ function TaskPage({
             {([
               { key: "plan" as const, icon: <Layers size={14} />, label: "Task Plan" },
               { key: "sources" as const, icon: <Search size={14} />, label: "Source Documents" },
+              { key: "keypoints" as const, icon: <Camera size={14} />, label: "Keypoints" },
               { key: "json" as const, icon: <Code2 size={14} />, label: "JSON" },
             ]).map((t) => (
               <button
@@ -527,6 +528,7 @@ function TaskPage({
           <div className="flex-1 overflow-y-auto p-5">
             {activeTab === "plan" && <PlanTab result={result} />}
             {activeTab === "sources" && <SourcesTab result={result} />}
+            {activeTab === "keypoints" && <KeypointsTab result={result} />}
             {activeTab === "json" && <JsonTab result={result} />}
           </div>
         </div>
@@ -932,6 +934,162 @@ function SourceCard({ result }: { result: SearchResult }) {
 
 /* ========================================================================= */
 /* JSON Tab                                                                  */
+/* ========================================================================= */
+
+const KEYPOINT_COLORS = ["#00ff00", "#ff00ff", "#00ffff", "#ffff00", "#ff8800"];
+
+function KeypointsTab({ result }: { result: ExecuteResult | null }) {
+  const [prompt, setPrompt] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [kpResult, setKpResult] = useState<KeypointResponse | null>(null);
+
+  const defaultPrompt = (() => {
+    const steps = result?.task_plan?.task_plan?.steps ?? [];
+    const probeStep = steps.find((s: Step) => ["PROBE", "MOVE", "MEASURE"].includes(s.action));
+    if (!probeStep) return "";
+    const pos = (probeStep.parameters as Record<string, string | undefined> | undefined)?.probe_positive;
+    const neg = (probeStep.parameters as Record<string, string | undefined> | undefined)?.probe_negative;
+    const parts = [pos, neg].filter(Boolean);
+    return parts.length
+      ? `Locate ${parts.join(" and ")} on the board, and the tip of the multimeter probe`
+      : `Locate the target component and the tip of the multimeter probe`;
+  })();
+
+  const referenceImages = (result?.search_results ?? []).flatMap((sr) =>
+    (sr.extracted_info?.relevant_images ?? []).map((img) => {
+      const imgName = img.split("/").pop() ?? img;
+      return {
+        doc_name: sr.document_name.replace("_parsed", ""),
+        image_name: imgName.endsWith(".png") ? imgName : imgName + ".png",
+      };
+    })
+  );
+
+  async function handleRun() {
+    const p = prompt.trim() || defaultPrompt;
+    if (!p) return;
+    setLoading(true);
+    setError("");
+    setKpResult(null);
+    try {
+      const res = await locateKeypoints(p, referenceImages);
+      setKpResult(res);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!result?.task_plan) {
+    return <EmptyState icon={<Camera size={32} />} text="Execute a task first to enable keypoint localisation." />;
+  }
+
+  return (
+    <div className="animate-slide-up space-y-5">
+      <div className="space-y-2">
+        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Keypoint prompt
+        </label>
+        <textarea
+          className="w-full text-sm border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-teal-400 resize-none"
+          rows={2}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder={defaultPrompt || "e.g. locate the 5V LDO regulator and the multimeter probe tip"}
+        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleRun}
+            disabled={loading}
+            className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+            {loading ? "Capturing & analysing\u2026" : "Locate on Camera"}
+          </button>
+          {referenceImages.length > 0 && (
+            <span className="text-xs text-gray-400">
+              {referenceImages.length} reference image{referenceImages.length !== 1 ? "s" : ""} from docs
+            </span>
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+          {error}
+        </div>
+      )}
+
+      {kpResult && (
+        <div className="space-y-4">
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Annotated Camera Frame</h4>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`data:image/png;base64,${kpResult.annotated_image}`}
+              alt="Annotated camera frame with keypoints"
+              className="w-full rounded-xl border border-gray-200 object-contain"
+            />
+          </div>
+
+          {kpResult.keypoints.length > 0 ? (
+            <div>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                Detected Keypoints ({kpResult.keypoints.length})
+              </h4>
+              <div className="space-y-2">
+                {kpResult.keypoints.map((kp, i) => (
+                  <div key={i} className="flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50">
+                    <span
+                      className="w-3 h-3 rounded-full flex-shrink-0 border-2"
+                      style={{ borderColor: KEYPOINT_COLORS[i % KEYPOINT_COLORS.length], backgroundColor: "black" }}
+                    />
+                    <span className="text-sm font-medium text-gray-800 flex-1">{kp.label}</span>
+                    <span className="text-xs text-gray-400 font-mono">
+                      norm ({kp.point[1]}, {kp.point[0]})
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-400 text-center py-4">
+              No keypoints detected &mdash; try rephrasing the prompt.
+            </div>
+          )}
+
+          {(() => {
+            const steps = result?.task_plan?.task_plan?.steps ?? [];
+            const relevant = steps.filter((s: Step) =>
+              ["PROBE", "MOVE", "MEASURE"].includes(s.action)
+            );
+            if (!relevant.length) return null;
+            return (
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                  Planned Arm Movements
+                </h4>
+                <div className="space-y-2">
+                  {relevant.map((s: Step, i: number) => (
+                    <div key={i} className="flex gap-3 px-4 py-3 rounded-xl border border-teal-100 bg-teal-50">
+                      <span className="text-xs font-bold text-teal-600 uppercase w-16 flex-shrink-0 pt-0.5">
+                        {s.action}
+                      </span>
+                      <span className="text-sm text-gray-700">{s.description}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ========================================================================= */
 
 function JsonTab({ result }: { result: ExecuteResult | null }) {
