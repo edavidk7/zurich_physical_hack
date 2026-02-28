@@ -211,3 +211,5 @@ models/
 
 # Hackathon documents (too large for git)
 data/Hackathon_documents/
+.DS_Store
+data/parsed
