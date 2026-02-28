@@ -263,3 +263,50 @@ export async function motorEnableTorque(): Promise<{ status: string }> {
 export async function motorDisableTorque(): Promise<{ status: string }> {
   return apiFetch<{ status: string }>("/api/motor/torque/disable", { method: "POST" });
 }
+
+// ---------------------------------------------------------------------------
+// Keypoint Localisation
+// ---------------------------------------------------------------------------
+
+export interface KeypointResponse {
+  annotated_image: string;
+  keypoints: { label: string; point: [number, number] }[];
+  prompt: string;
+  camera_size: [number, number];
+}
+
+export async function locateKeypoints(
+  prompt: string,
+  referenceImages: { doc_name: string; image_name: string }[],
+  model = "gemini-2.5-flash",
+  thinkingBudget = 0,
+): Promise<KeypointResponse> {
+  return apiFetch<KeypointResponse>("/api/keypoints", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      reference_images: referenceImages,
+      model,
+      thinking_budget: thinkingBudget,
+    }),
+  });
+}
+
+export async function executeStepKeypoints(
+  step: Record<string, unknown>,
+  referenceImages: { doc_name: string; image_name: string }[],
+  model = "gemini-2.5-flash",
+  thinkingBudget = 0,
+): Promise<KeypointResponse> {
+  return apiFetch<KeypointResponse>("/api/execute/step-keypoints", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      step,
+      reference_images: referenceImages,
+      model,
+      thinking_budget: thinkingBudget,
+    }),
+  });
+}

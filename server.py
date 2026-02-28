@@ -19,6 +19,12 @@ from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel
 
 from src.camera import CameraCapture, CameraConfig
+from src.high_level_planner import (
+    extract_keypoints,
+    annotate_image_pil,
+    annotated_image_to_base64,
+    load_and_prep_image,
+)
 from src.kinematics import get_kinematics
 from src.motor_control import get_motor_controller, find_robot_port
 
@@ -729,6 +735,141 @@ async def camera_stream():
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Routes — Keypoint localisation
+# ---------------------------------------------------------------------------
+
+class ReferenceImage(BaseModel):
+    doc_name: str
+    image_name: str
+
+
+class KeypointRequest(BaseModel):
+    prompt: str
+    reference_images: list[ReferenceImage] = []
+    model: str = "gemini-2.5-flash"
+    thinking_budget: int = 0
+
+
+class StepKeypointRequest(BaseModel):
+    step: dict
+    reference_images: list[ReferenceImage] = []
+    model: str = "gemini-2.5-flash"
+    thinking_budget: int = 0
+
+
+def _prompt_from_step(step: dict) -> str:
+    """Auto-generate a keypoint localisation prompt from a task plan step."""
+    params = step.get("parameters") or {}
+    probe_pos = params.get("probe_positive", "")
+    probe_neg = params.get("probe_negative", "")
+    targets = [p for p in [probe_pos, probe_neg] if p and isinstance(p, str)]
+    if targets:
+        return (
+            f"Locate {' and '.join(targets)} on the board, "
+            "and the current tip position of the multimeter probe"
+        )
+    target = step.get("target") or step.get("description") or "the target component"
+    return f"Locate {target} on the board and the current tip position of the multimeter probe"
+
+
+@app.post("/api/execute/step-keypoints")
+async def step_keypoints(req: StepKeypointRequest):
+    """
+    For a single plan step: capture camera, run VLM keypoint localisation,
+    return annotated image + keypoints.  Prompt is auto-generated from the step.
+    """
+    from PIL import Image
+    import io
+
+    prompt = _prompt_from_step(req.step)
+
+    ref_pil: list[Image.Image] = []
+    for ri in req.reference_images:
+        clean = ri.doc_name.replace("_parsed", "")
+        img_path = PARSED_DIR / f"{clean}_images" / ri.image_name
+        if not img_path.exists():
+            img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
+        if not img_path.exists():
+            raise HTTPException(404, f"Reference image not found: {ri.doc_name}/{ri.image_name}")
+        ref_pil.append(load_and_prep_image(img_path))
+
+    try:
+        cam = _get_camera()
+        loop = asyncio.get_event_loop()
+        jpeg_bytes = await loop.run_in_executor(None, cam.capture_jpeg)
+        camera_pil = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(500, f"Camera error: {e}")
+
+    try:
+        keypoints = await asyncio.to_thread(
+            extract_keypoints, ref_pil, camera_pil, prompt, req.model, req.thinking_budget,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"VLM error: {e}")
+
+    annotated = annotate_image_pil(camera_pil, keypoints)
+    img_b64 = annotated_image_to_base64(annotated)
+
+    return {
+        "annotated_image": img_b64,
+        "keypoints": keypoints,
+        "prompt": prompt,
+        "camera_size": list(camera_pil.size),
+    }
+
+
+@app.post("/api/keypoints")
+async def locate_keypoints(req: KeypointRequest):
+    """
+    Capture a live camera frame, run VLM keypoint localisation using the
+    provided reference images, and return the annotated camera image + keypoints.
+    """
+    from PIL import Image
+    import io
+
+    ref_pil: list[Image.Image] = []
+    for ri in req.reference_images:
+        clean = ri.doc_name.replace("_parsed", "")
+        img_path = PARSED_DIR / f"{clean}_images" / ri.image_name
+        if not img_path.exists():
+            img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
+        if not img_path.exists():
+            raise HTTPException(404, f"Reference image not found: {ri.doc_name}/{ri.image_name}")
+        ref_pil.append(load_and_prep_image(img_path))
+
+    try:
+        cam = _get_camera()
+        loop = asyncio.get_event_loop()
+        jpeg_bytes = await loop.run_in_executor(None, cam.capture_jpeg)
+        camera_pil = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(500, f"Camera error: {e}")
+
+    try:
+        keypoints = await asyncio.to_thread(
+            extract_keypoints,
+            ref_pil,
+            camera_pil,
+            req.prompt,
+            req.model,
+            req.thinking_budget,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"VLM error: {e}")
+
+    annotated = annotate_image_pil(camera_pil, keypoints)
+    img_b64 = annotated_image_to_base64(annotated)
+
+    return {
+        "annotated_image": img_b64,
+        "keypoints": keypoints,
+        "prompt": req.prompt,
+        "camera_size": list(camera_pil.size),
+    }
 
 
 # ---------------------------------------------------------------------------

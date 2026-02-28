@@ -50,6 +50,8 @@ import {
   chatWithAgent,
   executeOnRobot,
   getDocumentContent,
+  locateKeypoints,
+  executeStepKeypoints,
   forwardKinematics,
   inverseKinematics,
   getHomePosition,
@@ -68,6 +70,7 @@ import type {
   Step,
   ChatMessage,
   SearchResultEvent,
+  KeypointResponse,
 } from "@/lib/types";
 
 // ===========================================================================

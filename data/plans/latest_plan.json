@@ -1,84 +1,73 @@
 {
   "plan": {
     "task_plan": {
-      "id": "arduino-uno-q-3v3-voltage-verify",
+      "id": "verify-arduino-uno-q-3v3-voltage",
       "user_request": "Verify the Arduino 3.3V pin outputs correct voltage per datasheet specs",
-      "description": "Measures the DC voltage on the +3V3 OUT pin of the Arduino Uno Q board and verifies it against the specified range of 3.1V to 3.5V, as per the 'arduino_uno_q' datasheet.",
-      "confidence_score": 0.9,
+      "description": "Measures the DC voltage output of the +3V3 OUT pin on the Arduino UNO Q's Qwiic header and verifies it against the specified range of 3.1V to 3.5V.",
+      "confidence_score": 0.95,
       "equipment": {
         "robot": "SO-ARM100",
         "tool": "multimeter probe",
-        "dut": "Arduino Uno Q"
+        "dut": "Arduino UNO Q"
       },
       "setup": {
         "multimeter_mode": "DC_VOLTAGE",
         "multimeter_range": "auto",
         "dut_power": "powered",
-        "notes": "Ensure the Arduino Uno Q board is powered on before starting the test."
+        "notes": "Ensure the Arduino UNO Q is powered on before starting measurements. Manually connect the multimeter's negative (black) probe to an accessible GND pin on the Arduino UNO Q board. The robot will manipulate the positive (red) probe."
       },
       "steps": [
         {
           "step_id": 1,
           "action": "MOVE",
-          "target": "safe_pre_measurement_position",
-          "description": "Move the robotic arm to a safe, home position above the DUT.",
-          "parameters": {},
-          "pass_criteria": "Robot arm is in safe position.",
-          "fail_action": "STOP"
+          "target": "Arduino UNO Q Qwiic header, Pin 2 (+3V3 OUT)",
+          "description": "Move the robot arm to position the positive multimeter probe above the +3V3 OUT pin on the Qwiic header (Pin 2).",
+          "parameters": {
+            "pin": "+3V3 OUT (Qwiic header, Pin 2)"
+          },
+          "pass_criteria": "Robot arm successfully moved to target position.",
+          "fail_action": "Report movement failure and stop."
         },
         {
           "step_id": 2,
           "action": "WAIT",
-          "target": "5_seconds",
-          "description": "Wait for 5 seconds for any residual vibrations to settle.",
-          "parameters": {},
-          "pass_criteria": "Wait completed.",
-          "fail_action": "STOP"
+          "target": "Robot arm stability",
+          "description": "Wait for 1 second for the robot arm to stabilize before probing.",
+          "parameters": {
+            "duration_seconds": 1
+          },
+          "pass_criteria": "Wait duration completed.",
+          "fail_action": "N/A"
         },
         {
           "step_id": 3,
           "action": "PROBE",
-          "target": "+3V3 OUT pin",
-          "description": "Position the positive multimeter probe onto the +3V3 OUT pin (JANALOG, Pin 4) on the Arduino Uno Q board.",
+          "target": "Arduino UNO Q Qwiic header, Pin 2 (+3V3 OUT)",
+          "description": "Lower the positive multimeter probe onto the +3V3 OUT pin (Qwiic header, Pin 2).",
           "parameters": {
-            "pin": "+3V3 OUT",
-            "probe_positive": "JANALOG, Pin 4"
+            "probe_positive": "+3V3 OUT (Qwiic header, Pin 2)",
+            "probe_negative": "GND (manually connected)"
           },
-          "pass_criteria": "Positive probe successfully placed.",
-          "fail_action": "STOP"
+          "pass_criteria": "Probe successfully made contact with the target pin.",
+          "fail_action": "Report probing failure and stop."
         },
         {
           "step_id": 4,
-          "action": "PROBE",
-          "target": "GND pin",
-          "description": "Position the negative multimeter probe onto an accessible GND pin on the Arduino Uno Q board.",
+          "action": "WAIT",
+          "target": "Probe contact stability",
+          "description": "Wait for 1 second for the probe to make stable electrical contact.",
           "parameters": {
-            "pin": "GND",
-            "probe_negative": "any accessible GND pin on DUT"
+            "duration_seconds": 1
           },
-          "pass_criteria": "Negative probe successfully placed.",
-          "fail_action": "STOP"
+          "pass_criteria": "Wait duration completed.",
+          "fail_action": "N/A"
         },
         {
           "step_id": 5,
           "action": "MEASURE",
-          "target": "+3V3 OUT voltage",
-          "description": "Measure the DC voltage between the +3V3 OUT pin and GND.",
+          "target": "Voltage at +3V3 OUT pin",
+          "description": "Measure the DC voltage between the +3V3 OUT pin and the manually connected GND.",
           "parameters": {
-            "measurement_type": "voltage",
-            "probe_positive": "+3V3 OUT (JANALOG, Pin 4)",
-            "probe_negative": "GND pin"
-          },
-          "pass_criteria": "Measurement successfully acquired.",
-          "fail_action": "STOP"
-        },
-        {
-          "step_id": 6,
-          "action": "VERIFY",
-          "target": "+3V3 OUT voltage",
-          "description": "Verify the measured voltage is within the specified range of 3.1V to 3.5V.",
-          "parameters": {
-            "pin": "+3V3 OUT",
             "measurement_type": "voltage",
             "expected_value": {
               "nominal": 3.3,
@@ -87,33 +76,46 @@
               "unit": "V"
             }
           },
-          "pass_criteria": "Measured voltage is >= 3.1V and <= 3.5V.",
-          "fail_action": "REPORT_AND_STOP"
+          "pass_criteria": "Measured voltage is between 3.1V and 3.5V (inclusive).",
+          "fail_action": "Report measurement failure and stop."
+        },
+        {
+          "step_id": 6,
+          "action": "WAIT",
+          "target": "Measurement completion",
+          "description": "Wait for 2 seconds for the multimeter to complete the measurement and stabilize the reading.",
+          "parameters": {
+            "duration_seconds": 2
+          },
+          "pass_criteria": "Wait duration completed.",
+          "fail_action": "N/A"
         },
         {
           "step_id": 7,
           "action": "REPORT",
-          "target": "test_result",
-          "description": "Report the measured voltage and the verification result.",
+          "target": "Measurement result",
+          "description": "Report the measured voltage value and whether it passed or failed the verification criteria.",
           "parameters": {},
-          "pass_criteria": "Report generated.",
-          "fail_action": "STOP"
+          "pass_criteria": "N/A",
+          "fail_action": "N/A"
         },
         {
           "step_id": 8,
           "action": "MOVE",
-          "target": "safe_home_position",
-          "description": "Retract both multimeter probes from the DUT and move the robotic arm to a safe home position.",
-          "parameters": {},
-          "pass_criteria": "Robot arm is in safe home position.",
-          "fail_action": "STOP"
+          "target": "Retract positive probe",
+          "description": "Lift the positive multimeter probe from the +3V3 OUT pin and move the robot arm to a safe home position.",
+          "parameters": {
+            "pin": "N/A"
+          },
+          "pass_criteria": "Robot arm successfully moved to home position.",
+          "fail_action": "Report movement failure."
         }
       ],
       "summary": {
         "total_steps": 8,
         "estimated_duration_seconds": 60,
         "critical_checks": [
-          "Verification of +3V3 OUT pin voltage against datasheet specifications (3.1V - 3.5V)."
+          "3.3V output voltage on Arduino UNO Q's Qwiic header (Pin 2) is within the specified range of 3.1V to 3.5V."
         ]
       }
     }
