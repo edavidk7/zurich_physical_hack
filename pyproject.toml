@@ -14,4 +14,6 @@ dependencies = [
     "streamlit>=1.54.0",
     "v4l2py>=1.0.0",
     "Pillow>=10.0.0",
+    "opencv-python>=4.13.0.92",
+    "lerobot>=0.4.4",
 ]

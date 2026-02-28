@@ -30,6 +30,8 @@ import {
   Bot,
   User,
   Sparkles,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 
 import {
@@ -591,15 +593,50 @@ function RobotPanel({ status }: { status: string }) {
 }
 
 function CameraFeed() {
-  return (
-    <div className="rounded-xl overflow-hidden border-2 border-gray-800 bg-gray-900 aspect-video flex items-center justify-center relative">
-      <div className="absolute top-2 left-3 flex items-center gap-1.5 text-[10px] text-gray-500">
+  const streamUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/camera/stream`;
+  const [error, setError] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const feed = (
+    <div className={`rounded-xl overflow-hidden border-2 border-gray-800 bg-gray-900 aspect-video flex items-center justify-center relative ${expanded ? "w-full h-full rounded-none border-0" : ""}`}>
+      <div className="absolute top-2 left-3 z-10 flex items-center gap-1.5 text-[10px] text-gray-500 bg-black/50 px-2 py-0.5 rounded-full">
         <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse-dot" />
         LIVE — CAM 1
       </div>
-      <span className="text-gray-600 text-sm flex items-center gap-1.5"><Camera size={16} /> Camera feed</span>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="absolute top-2 right-3 z-10 p-1 rounded bg-black/50 text-gray-400 hover:text-white hover:bg-black/70 transition-colors cursor-pointer"
+        title={expanded ? "Minimize" : "Expand"}
+      >
+        {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+      </button>
+      {error ? (
+        <span className="text-gray-600 text-sm flex items-center gap-1.5"><Camera size={16} /> Camera offline</span>
+      ) : (
+        <img
+          src={streamUrl}
+          alt="Robot camera feed"
+          className={`w-full h-full ${expanded ? "object-contain" : "object-cover"}`}
+          onError={() => setError(true)}
+        />
+      )}
     </div>
   );
+
+  if (expanded) {
+    return (
+      <div
+        className="fixed inset-0 z-50 bg-black flex items-center justify-center"
+        onClick={() => setExpanded(false)}
+      >
+        <div className="w-full h-full" onClick={(e) => e.stopPropagation()}>
+          {feed}
+        </div>
+      </div>
+    );
+  }
+
+  return feed;
 }
 
 function KBSummary({ docs }: { docs: DocumentsResponse | null }) {

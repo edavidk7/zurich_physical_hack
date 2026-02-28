@@ -6,14 +6,19 @@ REST API that wraps the Gemini agent pipeline for the Next.js frontend.
 
 import json
 import asyncio
+import os
+import time
+import threading
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel
+
+from src.camera import CameraCapture, CameraConfig
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -32,9 +37,37 @@ for d in (PARSED_DIR, PLANS_DIR, UPLOAD_DIR):
 # ---------------------------------------------------------------------------
 
 
+# Camera singleton — keeps the camera open for fast frame access
+_camera_lock = threading.Lock()
+_camera = None
+
+CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", "1"))
+
+
+def _get_camera():
+    global _camera
+    if _camera is None:
+        with _camera_lock:
+            if _camera is None:
+                cfg = CameraConfig(index=CAMERA_INDEX, width=640, height=480)
+                _camera = CameraCapture(cfg)
+                _camera.open()
+    return _camera
+
+
+def _close_camera():
+    global _camera
+    if _camera is not None:
+        with _camera_lock:
+            if _camera is not None:
+                _camera.close()
+                _camera = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
+    _close_camera()
 
 
 app = FastAPI(title="DocOps API", version="0.1.0", lifespan=lifespan)
@@ -447,6 +480,47 @@ async def robot_status():
         return {"status": "idle", "message": "No task queued."}
     data = json.loads(plan_path.read_text())
     return {"status": data.get("status", "unknown"), "message": "Task plan loaded."}
+
+
+# ---------------------------------------------------------------------------
+# Routes — Camera
+# ---------------------------------------------------------------------------
+
+@app.get("/api/camera/frame")
+async def camera_frame():
+    """Return a single JPEG snapshot from the robot camera."""
+    try:
+        cam = _get_camera()
+        loop = asyncio.get_event_loop()
+        jpeg = await loop.run_in_executor(None, cam.capture_jpeg)
+        return Response(content=jpeg, media_type="image/jpeg")
+    except Exception as e:
+        raise HTTPException(500, f"Camera error: {e}")
+
+
+@app.get("/api/camera/stream")
+async def camera_stream():
+    """MJPEG stream from the robot camera for live feed."""
+    async def generate():
+        cam = _get_camera()
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                jpeg = await loop.run_in_executor(None, cam.capture_jpeg)
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + jpeg
+                    + b"\r\n"
+                )
+                await asyncio.sleep(0.1)  # ~10 fps
+            except Exception:
+                break
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 # ---------------------------------------------------------------------------
