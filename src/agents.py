@@ -36,6 +36,19 @@ def _get_client() -> genai.Client:
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 
+def _call_gemini(client, model, prompt, system_instruction, temperature=0.1, max_output_tokens=16384):
+    """Call Gemini API. Fails fast on errors instead of retrying."""
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        ),
+    )
+    return response
+
 
 # ---------------------------------------------------------------------------
 # DocumentSearcher — finds relevant info for a user query
@@ -84,7 +97,12 @@ Output ONLY valid JSON:
     "safety_warnings": [
       "any safety-relevant info for this task"
     ],
-    "additional_context": "any other relevant info from the document"
+    "additional_context": "any other relevant info from the document",
+    "relevant_images": [
+      "image_N.png — list the image filenames (e.g. image_3.png) that appear \
+near sections relevant to the user's task. Look for ![Image](...) references \
+in the document and include only those near relevant specs, pinouts, or diagrams."
+    ]
   }
 }
 
@@ -126,14 +144,9 @@ class DocumentSearcher:
             doc_content=doc_content,
         )
 
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=DOC_SEARCHER_SYSTEM,
-                temperature=0.1,
-                max_output_tokens=16384,
-            ),
+        response = _call_gemini(
+            self.client, self.model, prompt,
+            system_instruction=DOC_SEARCHER_SYSTEM,
         )
 
         text = response.text.strip()
@@ -272,14 +285,9 @@ class TaskPlanner:
             extracted_info=json.dumps(extracted_info, indent=2),
         )
 
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=TASK_PLANNER_SYSTEM,
-                temperature=0.1,
-                max_output_tokens=16384,
-            ),
+        response = _call_gemini(
+            self.client, self.model, prompt,
+            system_instruction=TASK_PLANNER_SYSTEM,
         )
 
         text = response.text.strip()

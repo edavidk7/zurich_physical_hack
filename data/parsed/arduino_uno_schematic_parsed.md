@@ -1,0 +1,1 @@
+![Image](arduino_uno_schematic_images/image_1.png)
