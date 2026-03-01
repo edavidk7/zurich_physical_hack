@@ -238,7 +238,7 @@ def _marker_obj_corners(
     on the printed sheet, in metres, Z=0.
 
     Board frame origin = TL corner of marker ID 0.
-      X -> right (column direction)
+      X -> right (column direction on the sheet)
       Y -> down  (row direction)
     """
     row, col = _marker_grid_pos(marker_id)

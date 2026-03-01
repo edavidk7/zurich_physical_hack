@@ -1573,7 +1573,17 @@ async def run_step(req: RunStepRequest):
 
     solver = get_ik_solver()
     T_robot_cam = compute_T_robot_cam(q_current_urdf, solver)
+    # The camera sensor is horizontally mirrored relative to the robot coordinate
+    # frame (physical right appears as image left). This is a reflection — it cannot
+    # be expressed in R_cam_ee without breaking the rotation matrix (det=-1), so it
+    # must be corrected here by negating the camera X component before transforming.
+    pos_cam_m[0] = -pos_cam_m[0]
     target_robot = cam_to_robot(pos_cam_m, T_robot_cam)
+
+    # Safety clearance: lift target above the workspace so the tool doesn't collide
+    from src.constants import WORKSPACE_SAFETY_Z_M
+
+    target_robot[2] += WORKSPACE_SAFETY_Z_M
 
     # Current tip position (in URDF/robot frame)
     current_tip = solver.current_tip_pos(q_current_urdf)
@@ -1591,16 +1601,24 @@ async def run_step(req: RunStepRequest):
         f"[run-step] Camera origin (robot frame): ({cam_origin_robot_mm[0]:.1f}, {cam_origin_robot_mm[1]:.1f}, {cam_origin_robot_mm[2]:.1f}) mm"
     )
     print(
-        f"[run-step] Target in camera frame: ({pos_cam_m[0]*1000:.1f}, {pos_cam_m[1]*1000:.1f}, {pos_cam_m[2]*1000:.1f}) mm"
+        f"[run-step] Target in camera frame: ({pos_cam_m[0] * 1000:.1f}, {pos_cam_m[1] * 1000:.1f}, {pos_cam_m[2] * 1000:.1f}) mm"
     )
     print(
-        f"[run-step] Target in robot frame:  ({target_robot[0]*1000:.1f}, {target_robot[1]*1000:.1f}, {target_robot[2]*1000:.1f}) mm"
+        f"[run-step] Target in robot frame:  ({target_robot[0] * 1000:.1f}, {target_robot[1] * 1000:.1f}, {target_robot[2] * 1000:.1f}) mm"
     )
     print(
-        f"[run-step] Current tip:  ({current_tip[0]*1000:.1f}, {current_tip[1]*1000:.1f}, {current_tip[2]*1000:.1f}) mm"
+        f"[run-step] Current tip:  ({current_tip[0] * 1000:.1f}, {current_tip[1] * 1000:.1f}, {current_tip[2] * 1000:.1f}) mm"
     )
     print(
-        f"[run-step] Delta: ({delta[0]*1000:.1f}, {delta[1]*1000:.1f}, {delta[2]*1000:.1f}) mm   dist={dist_m*1000:.1f} mm"
+        f"[run-step] Delta: ({delta[0] * 1000:.1f}, {delta[1] * 1000:.1f}, {delta[2] * 1000:.1f}) mm   dist={dist_m * 1000:.1f} mm"
+    )
+    # ── Direction check: what does camera LEFT map to in robot frame? ──────
+    _cam_left = T_robot_cam[:3, :3] @ np.array([-1.0, 0.0, 0.0])
+    print(
+        f"[run-step] DIRECTION CHECK: cam -X (image left) → robot ({_cam_left[0]:.3f}, {_cam_left[1]:.3f}, {_cam_left[2]:.3f})"
+    )
+    print(
+        f"[run-step] shoulder_pan:  current={q_current_urdf['shoulder_pan']:.2f} deg (URDF)"
     )
 
     # ── 8. Solve IK (in URDF space) ──────────────────────────────────────
@@ -1611,6 +1629,13 @@ async def run_step(req: RunStepRequest):
 
     # Verify IK solution
     achieved_tip = solver.current_tip_pos(q_target_urdf)
+    print(
+        f"[run-step] shoulder_pan:  target={q_target_urdf['shoulder_pan']:.2f} deg (URDF)"
+        f"  Δ={q_target_urdf['shoulder_pan'] - q_current_urdf['shoulder_pan']:+.2f} deg"
+    )
+    print(
+        f"[run-step] motor shoulder_pan: {q_current_motor['shoulder_pan']:.2f} → {urdf_deg_to_motor(q_target_urdf)['shoulder_pan']:.2f} deg"
+    )
     ik_error_m = float(np.linalg.norm(achieved_tip - target_robot))
     print(f"[run-step] IK solution tip: {achieved_tip}, error: {ik_error_m:.5f} m")
 

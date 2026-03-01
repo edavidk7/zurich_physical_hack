@@ -32,12 +32,12 @@ CAM_TILT_EE_DEG: float = 35.0
 # translates directly into a 1 mm translation error in the camera-EE frame,
 # which is amplified by the arm lever when transforming to robot base coords.
 # If camera-to-robot results are inaccurate, re-measure these first.
-TOOL_INTERSECT_DIST = 0.0115
-INTERSECT_TO_TIP = 0.0020
+TOOL_INTERSECT_DIST = 0.11
+INTERSECT_TO_TIP = 0.03
 INTERSECT_ANGLE = np.deg2rad(35)
 P_TIP_CAM_M: list[float] = [
-    0.001,
-    -0.001,
+    0.01,
+    -np.sin(INTERSECT_ANGLE) * INTERSECT_TO_TIP,
     TOOL_INTERSECT_DIST + np.cos(INTERSECT_ANGLE) * INTERSECT_TO_TIP,
 ]
 
@@ -57,6 +57,11 @@ BOARD_COLS: int = 20
 # Height of the target / workspace plane above the checkerboard surface (metres).
 # "3 mm" means the PCB or component being probed sits 3 mm above the board.
 WORKSPACE_PLANE_OFFSET_M: float = 0.003
+
+# Safety clearance above the computed target position (metres, in robot Z-up frame).
+# The tool tip will stop this far above the target instead of touching it.
+# Set to 0.0 to disable.
+WORKSPACE_SAFETY_Z_M: float = 0.010  # 10 mm
 
 # ── ArUco markers ─────────────────────────────────────────────────────────
 

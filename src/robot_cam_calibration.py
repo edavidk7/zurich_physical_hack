@@ -35,12 +35,12 @@ SO-101 physical setup (confirmed from MuJoCo sim RGB=XYZ on Fixed_Jaw frame):
   - EE frame axes at zero config: +X = forward (probe), +Y = up, +Z = right
   - Camera frame (OpenCV): +X = right, +Y = down, +Z = optical axis (forward)
   - Camera is mounted on top of the EE, looking roughly along EE +X
-    (forward) and tilted 35° downward (from EE +X toward EE +Z / workspace).
+    (forward) and tilted 35° downward toward the tool (from EE +X toward EE -Y).
   - R_cam_ee is composed of:
       a) A base frame rotation that maps EE axes → camera axes when the
          camera optical axis is aligned with EE +X (no tilt):
-         cam +Z = EE +X, cam +Y = EE +Z, cam +X = EE +Y
-      b) An Rx(+35°) pitch that tilts the optical axis downward toward workspace
+         cam +Z = EE +X, cam +Y = -EE +Y, cam +X = EE +Z
+      b) An Rx(+35°) pitch that tilts the optical axis downward toward tool/workspace
 
 Default constants (use these unless you re-calibrate):
   TOOL_OFFSET_EE = np.array([0.059, 0.0, 0.0])   # metres, along EE +X
@@ -103,21 +103,21 @@ def make_R_cam_ee(tilt_deg: float = CAM_TILT_EE_DEG) -> np.ndarray:
         (from the kinematic diagram: red=X along probe, green=Y up, blue=Z right)
       - Camera is mounted on top of the EE wrist, looking roughly along +EE X
         (forward / probe direction) and tilted ``tilt_deg`` degrees downward
-        toward the workspace (from EE +X toward EE +Z).
+        toward the tool tip (from EE +X toward EE -Y, i.e., downward).
 
     Construction:
       1. Base alignment (no tilt): camera axes vs EE axes when the camera
          optical axis is exactly aligned with EE +X:
            cam +Z (forward)  = EE +X (forward / probe direction)
-           cam +Y (down)     = EE +Z
-           cam +X (right)    = EE +Y (from right-hand rule: EE_Y × EE_Z = EE_X)
-         This gives R_base = [[ 0,  1,  0],
-                              [ 0,  0,  1],
+           cam +Y (down)     = -EE +Y  (camera "down" = world down = -EE_Y)
+           cam +X (right)    = EE +Z   (right-hand rule: EE_Z × (-EE_Y) = EE_X ✓)
+         This gives R_base = [[ 0,  0,  1],
+                              [ 0, -1,  0],
                               [ 1,  0,  0]]
 
-      2. Apply a pitch of ``tilt_deg`` around the *camera* X-axis (= EE +Y).
+      2. Apply a pitch of ``tilt_deg`` around the *camera* X-axis (= EE +Z).
          Positive tilt rotates cam +Z toward cam +Y, i.e., tilts the optical
-         axis downward from EE +X toward EE +Z (toward the workspace):
+         axis downward from EE +X toward EE -Y (toward the tool / workspace):
            R_tilt = Rx(tilt_deg)
 
       3. Final: R_cam_ee = R_tilt @ R_base
@@ -125,26 +125,20 @@ def make_R_cam_ee(tilt_deg: float = CAM_TILT_EE_DEG) -> np.ndarray:
     Returns a 3×3 rotation matrix (proper, det=+1).
     """
     # Base alignment: map EE frame to camera frame (no tilt)
-    #   cam_X = +ee_Y,  cam_Y = +ee_Z,  cam_Z = +ee_X
-    #   Right-hand check: ee_Y x ee_Z = ee_X  <=>  cam_X x cam_Y = cam_Z  ✓
-    #
-    # Confirmed from MuJoCo sim (RGB=XYZ on Fixed_Jaw) + physical mount:
-    #   - Camera optical axis (cam +Z) = EE +X (probe/forward direction)
-    #   - Camera down (cam +Y) = EE +Z
-    #   - Camera right (cam +X) = EE +Y (by right-hand rule)
-    #   - Camera is tilted 35° downward (from EE+X toward EE+Z) around cam X axis
+    #   cam_X = +ee_Z,  cam_Y = -ee_Y,  cam_Z = +ee_X
+    #   Right-hand check: ee_Z x (-ee_Y) = ee_X  <=>  cam_X x cam_Y = cam_Z  ✓
     R_base = np.array(
         [
-            [0, 1, 0],
             [0, 0, 1],
+            [0, -1, 0],
             [1, 0, 0],
         ],
         dtype=float,
     )
 
-    # Pitch around camera X-axis (= EE +Y) by tilt_deg.
-    # Positive = tilt optical axis downward (from EE +X toward EE +Z / workspace).
-    # Default +35° means the camera looks past the probe tip toward the board.
+    # Pitch around camera X-axis by tilt_deg.
+    # Positive tilt_deg rotates optical axis from EE +X toward EE -Y (downward).
+    # Default +35° means the camera looks past the probe tip toward the workspace.
     alpha = np.deg2rad(tilt_deg)
     R_tilt = np.array(
         [
