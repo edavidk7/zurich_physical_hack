@@ -202,8 +202,8 @@ def detect_board_corners(
     # We reduce rows and cols independently so a visible strip along either
     # axis is found quickly.
     candidates: list[tuple[int, int]] = []
-    for r in range(full_rows, 3, -1):
-        for c in range(full_cols, 3, -1):
+    for r in range(full_rows, 4, -1):
+        for c in range(full_cols, 4, -1):
              candidates.append((r, c))
     candidates.sort(key=lambda x: x[0] * x[1])
 
