@@ -41,6 +41,7 @@ import {
   Wifi,
   WifiOff,
   Home as HomeIcon,
+  RotateCcw,
 } from "lucide-react";
 
 import {
