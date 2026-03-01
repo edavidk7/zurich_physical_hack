@@ -1062,19 +1062,16 @@ class StepKeypointRequest(BaseModel):
 def _prompt_from_step(step: dict) -> str:
     """Auto-generate a keypoint localisation prompt from a task plan step.
 
-    The SO-101 robot only manipulates the positive (+) multimeter probe.
-    The negative probe is clipped to a fixed point and never moved, so we
-    only need to localise the positive probe's target and the current tip.
+    Only asks the VLM to locate the TARGET component/pin on the board.
+    The probe tip position is known from FK (fixed tool offset) — no need
+    to detect it visually.
     """
     params = step.get("parameters") or {}
     probe_pos = params.get("probe_positive", "")
     if probe_pos and isinstance(probe_pos, str):
-        return (
-            f"Locate {probe_pos} on the board, "
-            "and the current tip position of the robot's positive multimeter probe"
-        )
+        return f"Locate {probe_pos} on the board"
     target = step.get("target") or step.get("description") or "the target component"
-    return f"Locate {target} on the board and the current tip position of the robot's positive multimeter probe"
+    return f"Locate {target} on the board"
 
 
 @app.post("/api/execute/step-keypoints")
@@ -1396,9 +1393,15 @@ async def run_step(req: RunStepRequest):
     Returns the full computation result for user review + confirmation.
     """
     import numpy as np
+    import cv2
     from PIL import Image
-    from src.localize_from_aruco import localize_keypoint, load_calibration
+    from src.localize_from_aruco import (
+        localize_keypoint,
+        load_calibration,
+        annotate_aruco_on_image,
+    )
     from src.robot_cam_calibration import compute_T_robot_cam, cam_to_robot
+    from src.constants import P_TIP_CAM_M
 
     global _pending_move
 
@@ -1452,24 +1455,12 @@ async def run_step(req: RunStepRequest):
     img_b64 = annotated_image_to_base64(annotated)
 
     # ── 5. Pick the target keypoint and convert to pixel coords ──────────
-    # The VLM returns keypoints as {"point": [y, x], "label": "..."} in
-    # normalised 0-1000 coords.  The first keypoint whose label does NOT
-    # contain "probe" / "tip" / "robot" is the target component; the rest
-    # is the current probe position.  If we can't distinguish, use the
-    # first keypoint as the target.
-    target_kp = None
-    probe_kp = None
-    for kp in keypoints:
-        label_lower = (kp.get("label") or "").lower()
-        is_probe = any(w in label_lower for w in ("probe", "tip", "robot", "current"))
-        if is_probe and probe_kp is None:
-            probe_kp = kp
-        elif not is_probe and target_kp is None:
-            target_kp = kp
-    if target_kp is None:
-        target_kp = keypoints[0] if keypoints else None
-    if target_kp is None:
+    # The VLM only locates the TARGET component on the board.
+    # The probe/tip position is known from FK (fixed tool offset) — we
+    # do NOT ask Gemini to detect it.  Just use the first keypoint.
+    if not keypoints:
         raise HTTPException(422, "VLM returned no keypoints — cannot localise target")
+    target_kp = keypoints[0]
 
     # Convert normalised 0-1000 (y, x) → pixel (u, v)
     cam_w, cam_h = camera_pil.size  # (width, height)
@@ -1479,6 +1470,21 @@ async def run_step(req: RunStepRequest):
     print(
         f"[run-step] target '{target_kp.get('label')}' → pixel ({pixel_u:.1f}, {pixel_v:.1f})"
     )
+
+    # Probe tip pixel comes from the fixed camera-in-EE geometry (P_TIP_CAM_M).
+    # This is constant because camera and tool are rigidly attached to the EE.
+    K_cam, _, _, _ = load_calibration()
+    p_tip = np.array(P_TIP_CAM_M)
+    if p_tip[2] > 0:
+        tip_u = float(K_cam[0, 0] * p_tip[0] / p_tip[2] + K_cam[0, 2])
+        tip_v = float(K_cam[1, 1] * p_tip[1] / p_tip[2] + K_cam[1, 2])
+        probe_kp = {
+            "point": [tip_v / cam_h * 1000, tip_u / cam_w * 1000],
+            "label": "probe_tip (fixed)",
+            "pixel": [int(round(tip_u)), int(round(tip_v))],
+        }
+    else:
+        probe_kp = None
 
     # ── 6. ArUco-based 3D localisation ───────────────────────────────────
     # Convert PIL RGB → OpenCV BGR numpy array for ArUco detection
@@ -1503,11 +1509,37 @@ async def run_step(req: RunStepRequest):
     pos_board_m = loc_result["pos_board_m"]
     depth_m = loc_result["depth_m"]
     reproj_err = loc_result["pose"].reprojection_err_px
-    n_markers = len(loc_result["pose"].marker_ids)
+    pose_marker_ids = loc_result["pose"].marker_ids
+    all_detected_markers = loc_result.get("detected_markers")
+    n_markers = len(pose_marker_ids)
     print(
         f"[run-step] 3D cam-frame: {pos_cam_m}  (depth={depth_m:.4f} m, "
         f"markers={n_markers}, reproj={reproj_err:.2f} px)"
     )
+
+    # ── 6b. Re-annotate the keypoint image with ArUco markers ────────────
+    # Highlight which ArUco markers were used for the camera pose regression
+    # so the user can verify the localisation quality.
+    annotated_bgr = np.array(annotated)[:, :, ::-1].copy()  # PIL RGB → BGR
+    annotated_bgr = annotate_aruco_on_image(
+        annotated_bgr, pose_marker_ids, all_detected_markers
+    )
+    # Draw fixed probe tip crosshair on the annotated image
+    if probe_kp is not None:
+        pu, pv = probe_kp["pixel"]
+        cv2.drawMarker(annotated_bgr, (pu, pv), (0, 128, 255), cv2.MARKER_CROSS, 20, 2)
+        cv2.putText(
+            annotated_bgr,
+            "probe tip (fixed)",
+            (pu + 12, pv - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 128, 255),
+            1,
+        )
+    # Convert back to PIL RGB for base64 encoding
+    annotated = Image.fromarray(annotated_bgr[:, :, ::-1])
+    img_b64 = annotated_image_to_base64(annotated)
 
     # ── 7. Read current joint angles, compute cam→robot transform ────────
     ctrl = get_motor_controller()

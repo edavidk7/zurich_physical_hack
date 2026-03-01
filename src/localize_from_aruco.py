@@ -471,6 +471,65 @@ def pixel_to_3d(
 # ---------------------------------------------------------------------------
 
 
+def annotate_aruco_on_image(
+    image_bgr: np.ndarray,
+    pose_marker_ids: list[int],
+    all_markers: list[DetectedMarker] | None = None,
+) -> np.ndarray:
+    """
+    Draw ArUco marker highlights on a BGR image and return the annotated copy.
+
+    Parameters
+    ----------
+    image_bgr       : BGR image to annotate
+    pose_marker_ids : IDs of markers that were used for pose regression
+                      (highlighted with thick cyan outlines + "POSE" label)
+    all_markers     : all detected markers (drawn with thin green outlines).
+                      If None, only pose markers are drawn.
+
+    Returns
+    -------
+    Annotated BGR image (copy; original is not modified).
+    """
+    img = image_bgr.copy()
+
+    # Draw all detected markers with thin green outlines
+    if all_markers:
+        for m in all_markers:
+            pts = m.corners_px.astype(np.int32)
+            cv2.polylines(img, [pts], True, (0, 200, 0), 1)
+            cx, cy = pts.mean(axis=0).astype(int)
+            cv2.putText(
+                img,
+                str(m.marker_id),
+                (cx - 8, cy + 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (0, 200, 0),
+                1,
+            )
+
+    # Highlight pose-used markers with thick cyan outlines + label
+    if all_markers:
+        pose_set = set(pose_marker_ids)
+        for m in all_markers:
+            if m.marker_id in pose_set:
+                pts = m.corners_px.astype(np.int32)
+                cv2.polylines(img, [pts], True, (255, 255, 0), 3)  # cyan in BGR
+                cx, cy = pts.mean(axis=0).astype(int)
+                cv2.putText(
+                    img,
+                    f"POSE",
+                    (cx - 18, cy - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (255, 255, 0),
+                    2,
+                )
+
+    return img
+
+
 def localize_keypoint(
     image: "str | Path | np.ndarray",
     keypoint_px: tuple[float, float],
@@ -526,6 +585,7 @@ def localize_keypoint(
 
     result = pixel_to_3d(keypoint_px, K, dist, pose, plane_offset_m)
     result["pose"] = pose
+    result["detected_markers"] = markers  # all detected markers for annotation
 
     if save_annotated:
         img = image_bgr.copy()
