@@ -56,7 +56,7 @@ except ImportError:
 
 _URDF_SOURCE = (
     Path(__file__).parents[1]
-    / ".venv/lib/python3.11/site-packages/resources/urdf/so-100/urdf/so-100.urdf"
+    / "resources/urdf/so-101/so101.urdf"
 )
 
 _STRIPPED_URDF: str | None = None   # path to the mesh-free copy
@@ -84,30 +84,31 @@ def _get_stripped_urdf() -> str:
 # ---------------------------------------------------------------------------
 
 # placo joint name  →  SO-101 motor name
+# SO-101 URDF already uses motor-style names directly
 _PLACO_TO_MOTOR = {
-    "Rotation":   "shoulder_pan",
-    "Pitch":      "shoulder_lift",
-    "Elbow":      "elbow_flex",
-    "Wrist_Pitch":"wrist_flex",
-    "Wrist_Roll": "wrist_roll",
-    "Jaw":        "gripper",
+    "shoulder_pan":  "shoulder_pan",
+    "shoulder_lift": "shoulder_lift",
+    "elbow_flex":    "elbow_flex",
+    "wrist_flex":    "wrist_flex",
+    "wrist_roll":    "wrist_roll",
+    "gripper":       "gripper",
 }
 _MOTOR_TO_PLACO = {v: k for k, v in _PLACO_TO_MOTOR.items()}
 
 # Arm joints used for IK (gripper is kept fixed during IK)
-_ARM_JOINTS_PLACO  = ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll"]
+_ARM_JOINTS_PLACO  = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
 _ARM_JOINTS_MOTOR  = [_PLACO_TO_MOTOR[j] for j in _ARM_JOINTS_PLACO]
 
 _EE_FRAME = "Fixed_Jaw"   # end-effector frame in the URDF / placo model
 
-# Motor degree limits (from URDF, converted)
+# Motor degree limits (from SO-101 URDF, converted)
 _LIMITS_DEG = {
-    "shoulder_pan":  (-91.7,  91.7),
-    "shoulder_lift": (-90.0,  90.0),
-    "elbow_flex":    (-91.7,  80.2),
-    "wrist_flex":    (-95.7,  95.7),
-    "wrist_roll":    (-180.0, 180.0),
-    "gripper":       (-12.0,  85.9),
+    "shoulder_pan":  (-110.0, 110.0),
+    "shoulder_lift": (-100.0, 100.0),
+    "elbow_flex":    (-96.8,  96.8),
+    "wrist_flex":    (-95.0,  95.0),
+    "wrist_roll":    (-157.2, 162.8),
+    "gripper":       (-10.0,  100.0),
 }
 
 ZERO_COMMAND: dict[str, float] = {m: 0.0 for m in _PLACO_TO_MOTOR.values()}
