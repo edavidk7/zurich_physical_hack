@@ -231,7 +231,7 @@ export default function Home() {
       {/* Sidebar */}
       <aside
         className="w-56 flex-shrink-0 flex flex-col"
-        style={{ background: "linear-gradient(180deg, #1a8a84 0%, #00695C 100%)" }}
+        style={{ background: "linear-gradient(180deg, #14b8a6 0%, #0e8c7d 100%)" }}
       >
         <div className="px-5 pt-6 pb-4">
           <div className="flex items-center gap-2 text-white">
@@ -614,7 +614,7 @@ function RobotPanel({ status }: { status: string }) {
   ];
 
   return (
-    <div className="rounded-xl p-5 text-white" style={{ background: "linear-gradient(135deg, #1a8a84 0%, #00695C 100%)" }}>
+    <div className="rounded-xl p-5 text-white" style={{ background: "linear-gradient(135deg, #14b8a6 0%, #0e8c7d 100%)" }}>
       <h3 className="text-sm font-semibold flex items-center gap-2 mb-4">
         <Cpu size={16} /> SO-ARM100 Status
       </h3>

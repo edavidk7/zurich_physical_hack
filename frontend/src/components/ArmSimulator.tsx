@@ -14,7 +14,8 @@ import type { URDFRobot } from "urdf-loader";
 /**
  * Joint mapping: our UI joints array is
  * [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]
- * in DEGREES. The URDF joint names match exactly.
+ * in DEGREES (first 5) and 0-100 PERCENT (gripper).
+ * The URDF joint names match exactly.
  */
 const JOINT_NAMES = [
   "shoulder_pan",
@@ -24,6 +25,37 @@ const JOINT_NAMES = [
   "wrist_roll",
   "gripper",
 ];
+
+/**
+ * Per-joint corrections to align motor readings with the URDF model.
+ *
+ * Calibrated from two observations of the same "upright" pose:
+ *   Real motor readings:  [-3, 8, -101, 10, -79, 39]°
+ *   Sim slider at upright: [0, 112, 80.5, 31, -170.5, 6.5]°
+ *
+ * Formula: urdf_deg = sign * motor_deg + offset
+ *          offset = sim_upright - sign * real_upright
+ */
+const JOINT_CORRECTIONS = [
+  { sign: -1, offsetDeg:   -3 },   // 0 shoulder_pan    0 - (-1)*(-3) = -3
+  { sign:  1, offsetDeg:  104 },   // 1 shoulder_lift  112 - (1)*(8)  = 104
+  { sign: 1, offsetDeg: -80.5 },   // 2 elbow_flex     80.5 - (1)*(-101) = -80.5 },
+  { sign: 1, offsetDeg:   -43 },   // 3 wrist_flex     31 - (-1)*(10) = 41
+  { sign:  1, offsetDeg: 0 },  // 4 wrist_roll -170.5 - (1)*(-79) = -91.5
+  { sign:  1, offsetDeg:    0 },   // 5 gripper      handled separately
+];
+
+/** Convert motor value → URDF joint angle in radians */
+function motorToUrdf(index: number, motorValue: number): number {
+  if (index === 5) {
+    // Gripper: motor 0-100 → URDF [-0.2, 2.0] rad
+    const pct = Math.max(0, Math.min(100, motorValue)) / 100;
+    return pct - 35;
+  }
+  const { sign, offsetDeg } = JOINT_CORRECTIONS[index];
+  const correctedDeg = sign * motorValue + offsetDeg;
+  return correctedDeg * (Math.PI / 180);
+}
 
 function RobotModel({ joints }: { joints: number[] }) {
   const groupRef = useRef<THREE.Group>(null);
@@ -64,7 +96,7 @@ function RobotModel({ joints }: { joints: number[] }) {
     JOINT_NAMES.forEach((name, i) => {
       const joint = robot.joints[name];
       if (joint) {
-        const angleRad = (joints[i] ?? 0) * (Math.PI / 180);
+        const angleRad = motorToUrdf(i, joints[i] ?? 0);
         joint.setJointValue(angleRad);
       }
     });
