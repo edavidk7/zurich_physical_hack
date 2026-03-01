@@ -1281,10 +1281,11 @@ function IKPage() {
       setRobotConnected(true);
       setRobotPort(res.port);
       if (res.positions_deg) {
-        setLivePositions(res.positions_deg);
+        const posMap = res.positions_deg;
+        setLivePositions(posMap);
         // Seed the joint sliders so they reflect the actual arm state
         const order = ["shoulder_pan","shoulder_lift","elbow_flex","wrist_flex","wrist_roll","gripper"];
-        setJoints(order.map(k => res.positions_deg[k] ?? 0));
+        setJoints(order.map(k => posMap[k] ?? 0));
       }
       setSendStatus(`Connected on ${res.port}`);
     } catch (e: unknown) {

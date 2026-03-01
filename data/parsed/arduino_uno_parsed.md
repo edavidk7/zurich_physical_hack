@@ -12,7 +12,7 @@ Maker, introduction, industries
 
 User Manual SKU: A000066
 
-![Image](arduino_uno_images/image_2.png)
+![Photograph of an Arduino Uno R3 development board, featuring](arduino_uno_images/image_2.png)
 
 ![Image](arduino_uno_images/image_3.png)
 
@@ -195,7 +195,7 @@ Top view
 
 Board topology
 
-![Image](arduino_uno_images/image_8.png)
+![PCB layout diagram showing component outlines and labels. Major](arduino_uno_images/image_8.png)
 
 ![Image](arduino_uno_images/image_9.png)
 
@@ -217,7 +217,7 @@ The Main Processor is a ATmega328P running at up to 20 MHz. Most of its pins are
 
 ## 3.3 Power Tree
 
-![Image](arduino_uno_images/image_11.png)
+![Power tree diagram showing VIN and USBVCC inputs feeding](arduino_uno_images/image_11.png)
 
 ![Image](arduino_uno_images/image_12.png)
 
@@ -245,7 +245,7 @@ Now that you have gone through the basics of what you can do with the board you 
 
 ## 5 Connector Pinouts
 
-![Image](arduino_uno_images/image_14.png)
+![A board topology diagram of an Arduino-like development board,](arduino_uno_images/image_14.png)
 
 Pinout
 
@@ -299,7 +299,7 @@ Pinout
 
 ## 5.4 Board Outline &amp; Mounting Holes
 
-![Image](arduino_uno_images/image_17.png)
+![Mechanical drawing showing a PCB outline with dimensions in](arduino_uno_images/image_17.png)
 
 Board outline
 
@@ -512,7 +512,7 @@ UNO 电路板是 Arduino 的旗舰产品。⽆论您是初次接触电路板产�
 
 ## 俯视图
 
-![Image](arduino_uno_images/image_24.png)
+![PCB layout diagram showing major components including connectors X1](arduino_uno_images/image_24.png)
 
 电路板拓扑结构
 
@@ -539,7 +539,7 @@ UNO 电路板是 Arduino 的旗舰产品。⽆论您是初次接触电路板产�
 
 电源树
 
-![Image](arduino_uno_images/image_26.png)
+![Power distribution block diagram showing VIN and USBVCC inputs feeding](arduino_uno_images/image_26.png)
 
 ![Image](arduino_uno_images/image_27.png)
 
@@ -567,7 +567,7 @@ Arduino UNO R3 的⽰例程序可以在 Arduino IDE 的 ' ⽰例 ' 菜单或 Ard
 
 ## 15 连接器引脚布局
 
-![Image](arduino_uno_images/image_29.png)
+![Pin-mapping diagram of an Arduino Uno-like board](arduino_uno_images/image_29.png)
 
 布局
 
@@ -623,7 +623,7 @@ Arduino UNO R3 的⽰例程序可以在 Arduino IDE 的 ' ⽰例 ' 菜单或 Ard
 
 电路板外形图
 
-![Image](arduino_uno_images/image_32.png)
+![Mechanical drawing showing the top-down view of a](arduino_uno_images/image_32.png)
 
 ![Image](arduino_uno_images/image_33.png)
 

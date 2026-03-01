@@ -1,4 +1,4 @@
-![Image](manual_0086_images/image_1.png)
+![Company logo featuring a stylized three-bladed symbol](manual_0086_images/image_1.png)
 
 ## Hydraulic System Hydraulic Valve
 
@@ -122,7 +122,7 @@ This section provides detailed technical specifications for the Hydraulic System
 | Altitude          | 0 to 1397         | 0 to 2585       | m      |
 | Vibration         | £ 2               | £ 10            | mm/s   |
 
-![Image](manual_0086_images/image_9.png)
+![Performance curve graph showing Head (m) on](manual_0086_images/image_9.png)
 
 ## Electrical Specifications
 
@@ -288,11 +288,11 @@ Follow these procedures for safe and efficient operation:
 
 ## Operating Characteristics
 
-![Image](manual_0086_images/image_11.png)
+![A line graph titled "Power Setting (kW)" plots "](manual_0086_images/image_11.png)
 
-![Image](manual_0086_images/image_12.png)
+![A line graph titled 'Fwd B/P Door](manual_0086_images/image_12.png)
 
-![Image](manual_0086_images/image_13.png)
+![A bifurcation diagram showing "Output" on the Y-axis](manual_0086_images/image_13.png)
 
 Emergency stop functions must be tested regularly to ensure they are functioning properly. Never disable safety systems.
 
@@ -349,7 +349,7 @@ Some maintenance tasks require specialized tools or training. Do not attempt mai
 
 ## Efficiency vs Speed
 
-![Image](manual_0086_images/image_14.png)
+![Line graph showing Efficiency (%) versus Speed (rpm).](manual_0086_images/image_14.png)
 
 - Always shut down and lock out equipment before maintenance.
 - Follow manufacturer's recommendations for lubricants and spare parts.
@@ -372,7 +372,7 @@ For more information see:
 
 ## Temperature Rise vs Time
 
-![Image](manual_0086_images/image_16.png)
+![Line graph showing Temperature (°C) versus Time (minutes). The temperature increases from 20°C at 0 minutes to 68°C at approximately 32 minutes, then continues to rise to 80°C at 120 minutes.](manual_0086_images/image_16.png)
 
 Keep detailed records of any troubleshooting procedures performed, including symptoms observed, measurements taken, and actions attempted. This information is valuable for warranty claims and future service.
 
@@ -401,7 +401,7 @@ When troubleshooting, always start with the simplest possible causes before inve
 
 Use systematic diagnostic procedures: observe symptoms, identify possible causes, test hypotheses, and verify solutions. Document each step for future reference.
 
-![Image](manual_0086_images/image_17.png)
+![Line graph showing Power Factor versus Load (%). Multiple lines represent different Voltage Settings (V), specifically 230V, 400V,](manual_0086_images/image_17.png)
 
 ![Image](manual_0086_images/image_18.png)
 
@@ -473,7 +473,7 @@ Refer to the wiring diagrams provided in the appendix. All connections must be m
 | 24V        | Control Supply | 0.75 mm²    | 24V DC    |
 | GND        | Control Ground | 0.75 mm²    | 0V        |
 
-![Image](manual_0086_images/image_19.png)
+![A mechanical drawing showing an exploded view of a](manual_0086_images/image_19.png)
 
 The Hydraulic System is compliant with applicable international standards for industrial machinery and electrical equipment. In case of deviation from these standards, these are listed in the declaration of incorporation. The declaration of incorporation is part of the delivery.
 

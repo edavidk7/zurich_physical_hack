@@ -1,4 +1,4 @@
-![Image](manual_0087_images/image_1.png)
+![Company logo featuring a stylized symbol resembling a three-bladed](manual_0087_images/image_1.png)
 
 ## Standby Generator
 
@@ -39,7 +39,7 @@ This document contains detailed technical specifications, installation procedure
 
 For technical support or additional information, please contact your local distributor or visit our website.
 
-![Image](manual_0087_images/image_2.png)
+![A technical note box with an information icon. The note](manual_0087_images/image_2.png)
 
 ![Image](manual_0087_images/image_3.png)
 
@@ -129,9 +129,9 @@ This section provides detailed technical specifications for the Generator model 
 | Altitude          | 0 to 1198         | 0 to 2698       | m      |
 | Vibration         | £ 2               | £ 10            | mm/s   |
 
-![Image](manual_0087_images/image_11.png)
+![Line graph showing Performance Index (%) versus Operating Point (%). Multiple](manual_0087_images/image_11.png)
 
-![Image](manual_0087_images/image_12.png)
+![Line graph titled "Chaotic System Response" plots "Response](manual_0087_images/image_12.png)
 
 | Parameter        | Value   | Unit       | Standard   |
 |------------------|---------|------------|------------|
@@ -157,7 +157,7 @@ When operating at non-standard conditions, consult with technical support to det
 | • Apply proper torque to all fasteners. • Use torque values specified in the technical sheet (39 Nm for main bolts). • Tighten in the correct sequence as shown in installation diagram.                                                                                                                              | data the Overtightening can damage components. Undertightening can cause loosening during operation.                 |
 | • Lubricate the sealing with grease just before fitting. • (Not too early - there is a risk of dirt and foreign particles adhering to the sealing.) • Fill 2/3 of the space between the dust lip and main lip with grease. • If the sealing is without dust lip, just lubricate main lip with a thin layer of grease. | the the Ensure that no grease is applied to the marked surface. Use approved lubricants specified in the parts list. |
 
-![Image](manual_0087_images/image_13.png)
+![Mechanical drawing showing a cutaway view of a generator](manual_0087_images/image_13.png)
 
 | Action                                                                                                                                                                                                           | Note                                                                                                                            |
 |------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
@@ -290,11 +290,11 @@ Follow these procedures for safe and efficient operation:
 
 ## Efficiency vs Speed
 
-![Image](manual_0087_images/image_14.png)
+![Line graph titled "Efficiency Vs Speed", plotting "](manual_0087_images/image_14.png)
 
 ## Chaotic System Response
 
-![Image](manual_0087_images/image_15.png)
+![A line graph plots Response (%) on the Y-axis against Time (s) on the X-axis. The graph displays a single fluctuating data series, with Response values varying between approximately 25% and 8](manual_0087_images/image_15.png)
 
 When operating in automatic mode, verify that all control signals are functioning correctly and that the equipment responds appropriately to commands.
 
@@ -368,7 +368,7 @@ For more information see:
 
 ## Temperature Rise vs Time
 
-![Image](manual_0087_images/image_17.png)
+![Line graph showing temperature versus time. The x-axis is](manual_0087_images/image_17.png)
 
 Before beginning troubleshooting procedures, ensure the equipment is safely shut down and all safety protocols are followed. Always refer to the safety instructions in Section 2 before performing any diagnostic work.
 
@@ -394,7 +394,7 @@ Troubleshooting the Generator requires systematic diagnosis of symptoms and thei
 
 When troubleshooting, always start with the simplest possible causes before investigating more complex issues. Many problems can be resolved through basic inspection and cleaning.
 
-![Image](manual_0087_images/image_18.png)
+![A technical diagram of an enclosed generator or engine system,](manual_0087_images/image_18.png)
 
 ![Image](manual_0087_images/image_19.png)
 

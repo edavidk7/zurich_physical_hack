@@ -212,6 +212,7 @@ export async function getTooltipProjection(): Promise<TooltipProjection> {
 export interface MotorConnectResult {
   status: string;
   port: string;
+  positions_deg?: Record<string, number> | null;
   error?: string;
 }
 
@@ -288,8 +289,10 @@ export interface KeypointResponse {
 export async function locateKeypoints(
   prompt: string,
   referenceImages: { doc_name: string; image_name: string }[],
-  model = "gemini-2.5-flash",
+  model = "gemini-3-flash-preview",
   thinkingBudget = 0,
+  thinkingLevel?: string,   // "minimal" | "low" | "medium" | "high"
+  temperature = 1.0,
 ): Promise<KeypointResponse> {
   return apiFetch<KeypointResponse>("/api/keypoints", {
     method: "POST",
@@ -299,6 +302,8 @@ export async function locateKeypoints(
       reference_images: referenceImages,
       model,
       thinking_budget: thinkingBudget,
+      thinking_level: thinkingLevel ?? null,
+      temperature,
     }),
   });
 }
@@ -306,8 +311,10 @@ export async function locateKeypoints(
 export async function executeStepKeypoints(
   step: Record<string, unknown>,
   referenceImages: { doc_name: string; image_name: string }[],
-  model = "gemini-2.5-flash",
+  model = "gemini-3-flash-preview",
   thinkingBudget = 0,
+  thinkingLevel?: string,   // "minimal" | "low" | "medium" | "high"
+  temperature = 1.0,
 ): Promise<KeypointResponse> {
   return apiFetch<KeypointResponse>("/api/execute/step-keypoints", {
     method: "POST",
@@ -317,6 +324,8 @@ export async function executeStepKeypoints(
       reference_images: referenceImages,
       model,
       thinking_budget: thinkingBudget,
+      thinking_level: thinkingLevel ?? null,
+      temperature,
     }),
   });
 }

@@ -1,1 +1,1 @@
-![Image](arduino_uno_schematic_images/image_1.png)
+![Circuit schematic for the Arduino(TM) UNO Rev](arduino_uno_schematic_images/image_1.png)

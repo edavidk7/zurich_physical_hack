@@ -12,7 +12,7 @@ Modified: 19/01/2026
 
 User Manual SKU: ABX00162-ABX00173
 
-![Image](arduino_uno_q_images/image_2.png)
+![Photograph of an Arduino UNO Q development board, featuring a](arduino_uno_q_images/image_2.png)
 
 ![Image](arduino_uno_q_images/image_3.png)
 
@@ -109,7 +109,7 @@ UNO Q is available in two variants:
 
 ## 2.2.1 Processing &amp; Memory
 
-![Image](arduino_uno_q_images/image_8.png)
+![PCB layout diagram showing top and bottom views of](arduino_uno_q_images/image_8.png)
 
 | Subsystem     | Details                                                                                                                                                                                                                                                                                                                                      |
 |---------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -131,7 +131,7 @@ The Qualcomm Dragonwing™ QRB2210 I/O operates at 1.8 V. The MPU drives the MIP
 
 ## 2.2.2 Connectivity &amp; Media
 
-![Image](arduino_uno_q_images/image_10.png)
+![Simplified PCB layout diagram of an Arduino UNO Q board,](arduino_uno_q_images/image_10.png)
 
 | Subsystem          | Details                                                                                                                                                                                                                                                                                    |
 |--------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -150,7 +150,7 @@ The wireless module uses SDIO for Wi-Fi® data and a UART for Bluetooth® contro
 
 ## 2.2.3 Expansion &amp; Headers
 
-![Image](arduino_uno_q_images/image_12.png)
+![PCB layout diagram showing top and bottom views of an Arduino UNO](arduino_uno_q_images/image_12.png)
 
 | Interface (Connector)   | Voltage & Pin Count         | Details                                                                                                                                                                                                                                                                                                                                    |
 |-------------------------|-----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -186,7 +186,7 @@ Modified: 19/01/2026
 
 ## 3.1 Input Power
 
-![Image](arduino_uno_q_images/image_15.png)
+![Photograph of an Arduino UNO Q development board with a USB-](arduino_uno_q_images/image_15.png)
 
 UNO Q Input Methods
 
@@ -248,7 +248,7 @@ Modified: 19/01/2026
 
 ## 4.1 Pinout
 
-![Image](arduino_uno_q_images/image_18.png)
+![Pinout diagram of an Arduino board, displaying major ICs](arduino_uno_q_images/image_18.png)
 
 Arduino® UNO Q
 
@@ -258,7 +258,7 @@ Modified: 19/01/2026
 
 ## 4.2 Block Diagram
 
-![Image](arduino_uno_q_images/image_20.png)
+![Block diagram illustrating the architecture of a system featuring a Qualcomm](arduino_uno_q_images/image_20.png)
 
 ## 4.3 Power Supply
 
@@ -274,7 +274,7 @@ Modified: 19/01/2026
 
 Arduino UNO Q Power Tree
 
-![Image](arduino_uno_q_images/image_22.png)
+![This is a power and connectivity block diagram showing the](arduino_uno_q_images/image_22.png)
 
 Arduino® UNO Q
 
@@ -284,7 +284,7 @@ Modified: 19/01/2026
 
 ## 5 UI &amp; Indicators
 
-![Image](arduino_uno_q_images/image_24.png)
+![PCB layout diagram of an Arduino UNO Q board, highlighting and](arduino_uno_q_images/image_24.png)
 
 - RGB LEDs (Linux-controlled): Two tri-color LEDs are driven by the Qualcomm Dragonwing™ QRB2210 application processor and exposed via /sys/class/leds/ .
 - RGB LED 1 (D27301): channels: red:user → GPIO\_41, green:user → GPIO\_42, blue:user → GPIO\_60.
@@ -435,7 +435,7 @@ Modified: 19/01/2026
 
 UNO Q Peripherals
 
-![Image](arduino_uno_q_images/image_31.png)
+![PCB layout diagram showing top and bottom views of an Arduino UNO](arduino_uno_q_images/image_31.png)
 
 - JDIGITAL (A2) (JDIGITAL1) / JANALOG (A3) (JANALOG1): 3.3 V GPIO with support for SPI, UART, CAN, PWM, and ADC inputs. Analog inputs are referenced to VREF+ on the 3.3 V rail. Valid input range is 0 V to VREF+ . Some STM32U585 pads may be 5 V-tolerant in digital mode, but when configured as ADC or any analog function (such as A0 through A5), they are not 5 V-tolerant and must not exceed VDD + 0.3 V . Use external conditioning like a voltage divider or buffer for higher voltages. For A4/A5 when used as I2C3 (PC1/PC0), use pull-ups to 3.3 V only.
 - QWIIC Connector (A4) (QWIIC1): Additional I²C bus (3.3 V logic). It maps as PD13 (I2C4\_SDA) and PD12 (I2C4\_SCL). It guarantees plug-and-play compatibility with Modulino® nodes and 3rd party sensors and actuators.
@@ -825,7 +825,7 @@ Modified: 19/01/2026
 
 UNO Q includes a power button (JBTN1) you can use to reboot the board.
 
-![Image](arduino_uno_q_images/image_44.png)
+![A rendered image of an Arduino UNO Q PCB, highlighting](arduino_uno_q_images/image_44.png)
 
 UNO Q Power Button
 
@@ -847,7 +847,7 @@ Modified: 19/01/2026
 
 The board dimension measures 68.58 mm × 53.34 mm, with bottom-side parts kept below 2 mm so the board can stack onto carrier bases. The outline and hole pattern follows and are compatible with the UNO form factor.
 
-![Image](arduino_uno_q_images/image_46.png)
+![Mechanical drawing showing top, front, and side views of](arduino_uno_q_images/image_46.png)
 
 Arduino® UNO Q
 
