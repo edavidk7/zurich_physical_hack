@@ -111,8 +111,8 @@ export default function Home() {
   });
 
   const EXAMPLES = [
-    "Verify the Arduino 3.3V pin outputs correct voltage per datasheet specs",
-    "Inspect conveyor belt tension according to maintenance manual",
+    "Verify the Arduino 5V pin outputs correct voltage per datasheet specs",
+    "Pick the Arduino Uno and place it on the measuring station",
     "Run pre-shift safety checklist for CNC lathe startup",
     "Check torque on M8 bolts per assembly SOP",
   ];
