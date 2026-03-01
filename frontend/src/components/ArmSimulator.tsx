@@ -27,30 +27,28 @@ const JOINT_NAMES = [
 ];
 
 /**
- * Per-joint corrections to align motor readings with the URDF model.
+ * Per-joint corrections to align motor readings with the SO101 URDF model.
  *
- * Calibrated from two observations of the same "upright" pose:
- *   Real motor readings:  [-3, 8, -101, 10, -79, 39]°
- *   Sim slider at upright: [0, 112, 80.5, 31, -170.5, 6.5]°
+ * The SO101 URDF uses all Z-axis revolute joints and motor degree values
+ * map directly to URDF angles (no offset needed at zero pose).
  *
  * Formula: urdf_deg = sign * motor_deg + offset
- *          offset = sim_upright - sign * real_upright
  */
 const JOINT_CORRECTIONS = [
-  { sign: -1, offsetDeg:   -3 },   // 0 shoulder_pan    0 - (-1)*(-3) = -3
-  { sign:  1, offsetDeg:  104 },   // 1 shoulder_lift  112 - (1)*(8)  = 104
-  { sign: 1, offsetDeg: -80.5 },   // 2 elbow_flex     80.5 - (1)*(-101) = -80.5 },
-  { sign: 1, offsetDeg:   -43 },   // 3 wrist_flex     31 - (-1)*(10) = 41
-  { sign:  1, offsetDeg: 0 },  // 4 wrist_roll -170.5 - (1)*(-79) = -91.5
-  { sign:  1, offsetDeg:    0 },   // 5 gripper      handled separately
+  { sign: 1, offsetDeg: 0 },   // 0 shoulder_pan
+  { sign: 1, offsetDeg: 0 },   // 1 shoulder_lift
+  { sign: 1, offsetDeg: 0 },   // 2 elbow_flex
+  { sign: 1, offsetDeg: 0 },   // 3 wrist_flex
+  { sign: 1, offsetDeg: 0 },   // 4 wrist_roll
+  { sign: 1, offsetDeg: 0 },   // 5 gripper (handled separately)
 ];
 
 /** Convert motor value → URDF joint angle in radians */
 function motorToUrdf(index: number, motorValue: number): number {
   if (index === 5) {
-    // Gripper: motor 0-100 → URDF [-0.2, 2.0] rad
+    // Gripper: motor 0-100% → SO101 URDF limits [-0.174533, 1.74533] rad
     const pct = Math.max(0, Math.min(100, motorValue)) / 100;
-    return pct - 35;
+    return -0.174533 + pct * (1.74533 - -0.174533);
   }
   const { sign, offsetDeg } = JOINT_CORRECTIONS[index];
   const correctedDeg = sign * motorValue + offsetDeg;
@@ -65,7 +63,7 @@ function RobotModel({ joints }: { joints: number[] }) {
   useEffect(() => {
     const loader = new URDFLoader();
     loader.packages = "";
-    loader.load("/robot/so100.urdf", (result) => {
+    loader.load("/robot/so101.urdf", (result) => {
       // Recolor all meshes
       result.traverse((child) => {
         if ((child as THREE.Mesh).isMesh) {
@@ -252,7 +250,7 @@ function GhostRobotModel({ joints }: { joints: number[] }) {
   useEffect(() => {
     const loader = new URDFLoader();
     loader.packages = "";
-    loader.load("/robot/so100.urdf", (result) => {
+    loader.load("/robot/so101.urdf", (result) => {
       result.traverse((child) => {
         if ((child as THREE.Mesh).isMesh) {
           const mesh = child as THREE.Mesh;
