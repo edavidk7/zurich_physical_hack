@@ -33,6 +33,10 @@ P_TIP_CAM_M: list[float] = [0.001, -0.001, TOOL_INTERSECT_DIST + np.cos(INTERSEC
 
 # ── Workspace checkerboard ────────────────────────────────────────────────────
 
+# Physical side length of one checkerboard square (millimetres).
+# Used as the fallback when "square_size_mm" is absent from calibration.json.
+BOARD_SQUARE_SIZE_MM: float = 23.0
+
 # Inner-corner grid of the *full* calibration board (rows × cols).
 # A 7×10 physical board has 6×9 inner corners.
 # These are the fallback defaults; the live values come from

@@ -26,6 +26,7 @@ load_dotenv()
 # Gemini client
 # ---------------------------------------------------------------------------
 
+
 def _get_client() -> genai.Client:
     """Create a Gemini client using the API key from environment."""
     api_key = os.getenv("GEMINI_API_KEY")
@@ -36,7 +37,10 @@ def _get_client() -> genai.Client:
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 
-def _call_gemini(client, model, prompt, system_instruction, temperature=0.1, max_output_tokens=16384):
+
+def _call_gemini(
+    client, model, prompt, system_instruction, temperature=0.1, max_output_tokens=16384
+):
     """Call Gemini API. Fails fast on errors instead of retrying."""
     response = client.models.generate_content(
         model=model,
@@ -144,7 +148,9 @@ class DocumentSearcher:
         )
 
         response = _call_gemini(
-            self.client, self.model, prompt,
+            self.client,
+            self.model,
+            prompt,
             system_instruction=DOC_SEARCHER_SYSTEM,
         )
 
@@ -171,8 +177,10 @@ class DocumentSearcher:
             result = self.search(user_task, content, doc_name)
             if result.get("relevant", False):
                 results.append(result)
-                print(f"    → Relevant! Found {len(result.get('extracted_info', {}).get('specs', []))} specs, "
-                      f"{len(result.get('extracted_info', {}).get('pins_involved', []))} pins")
+                print(
+                    f"    → Relevant! Found {len(result.get('extracted_info', {}).get('specs', []))} specs, "
+                    f"{len(result.get('extracted_info', {}).get('pins_involved', []))} pins"
+                )
             else:
                 print(f"    → Not relevant: {result.get('reason', 'no match')}")
 
@@ -188,9 +196,17 @@ You are TaskPlanner, an expert at creating specific executable task plans for \
 a robotic test/measurement system.
 
 The system consists of:
-- SO-ARM100: A 6-DOF robotic arm holding a multimeter probe
+- SO-ARM100: A 6-DOF robotic arm holding the multimeter's POSITIVE (+) probe
 - Multimeter: Can measure DC voltage, AC voltage, resistance, continuity
 - Device Under Test (DUT): Mounted in a fixture, e.g. an Arduino board
+
+CRITICAL — probe manipulation constraint:
+  The robot arm ONLY holds and moves the POSITIVE (+) multimeter probe.
+  The NEGATIVE (−) probe is manually clipped to a fixed reference point
+  (usually GND) before execution begins and is NEVER moved by the robot.
+  All robot MOVE/PROBE actions therefore target the positive probe only.
+  The negative probe placement is recorded for documentation but the robot
+  does not act on it.
 
 Given the user's task and the relevant technical specifications extracted from \
 documentation, generate a precise step-by-step plan the robot can execute.
@@ -204,13 +220,14 @@ Output ONLY valid JSON:
     "confidence_score": 0.0-1.0,
     "equipment": {
       "robot": "SO-ARM100",
-      "tool": "multimeter probe",
+      "tool": "multimeter positive probe (held by robot arm)",
       "dut": "device name"
     },
     "setup": {
       "multimeter_mode": "DC_VOLTAGE / AC_VOLTAGE / RESISTANCE / CONTINUITY",
       "multimeter_range": "auto or specific",
       "dut_power": "powered / unpowered",
+      "probe_negative_fixed": "where the − probe is clipped (e.g. GND pin/pad)",
       "notes": "any setup instructions"
     },
     "steps": [
@@ -223,8 +240,8 @@ Output ONLY valid JSON:
           "pin": "pin name if applicable",
           "measurement_type": "voltage / resistance / continuity",
           "expected_value": {"nominal": 0, "min": 0, "max": 0, "unit": "V"},
-          "probe_positive": "where to put + probe",
-          "probe_negative": "where to put - probe (usually GND)"
+          "probe_positive": "where the robot moves the + probe (the ONLY manipulated element)",
+          "probe_negative": "where the − probe is clipped (fixed, NOT moved by robot)"
         },
         "pass_criteria": "what makes this step pass",
         "fail_action": "what to do if it fails"
@@ -240,7 +257,8 @@ Output ONLY valid JSON:
 
 Guidelines:
 - Be specific: use exact pin names and expected values from the specs
-- Always specify both probe placements (positive and negative)
+- Always specify both probe placements (positive and negative) for documentation
+- The robot ONLY moves the positive probe — probe_negative is fixed and informational
 - Include realistic tolerances (e.g. ±5% for voltage regulators)
 - Start with safety checks if measuring high voltages
 - Keep it focused — only the steps needed for the user's specific task
@@ -285,7 +303,9 @@ class TaskPlanner:
         )
 
         response = _call_gemini(
-            self.client, self.model, prompt,
+            self.client,
+            self.model,
+            prompt,
             system_instruction=TASK_PLANNER_SYSTEM,
         )
 
@@ -299,6 +319,7 @@ class TaskPlanner:
 # ---------------------------------------------------------------------------
 # Pipeline: user task → search docs → plan
 # ---------------------------------------------------------------------------
+
 
 class Pipeline:
     """User-driven pipeline: natural language task → relevant docs → task plan."""
@@ -319,9 +340,9 @@ class Pipeline:
         Returns:
             Dict with search_results and task_plan.
         """
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Task: {user_task}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # Step 1: Search documents
         print(f"\n[1/2] Searching documents for relevant info...")
@@ -344,8 +365,10 @@ class Pipeline:
         task_plan = self.planner.plan(user_task, results)
         plan = task_plan.get("task_plan", task_plan)
         steps = plan.get("steps", [])
-        print(f"\n  ✓ Plan: {len(steps)} steps, "
-              f"confidence={plan.get('confidence_score', 'N/A')}")
+        print(
+            f"\n  ✓ Plan: {len(steps)} steps, "
+            f"confidence={plan.get('confidence_score', 'N/A')}"
+        )
         for s in steps:
             print(f"    {s['step_id']}. [{s['action']}] {s['description']}")
 

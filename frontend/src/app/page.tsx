@@ -607,7 +607,7 @@ function RobotPanel({ status }: { status: string }) {
   const rows = [
     ["State", status === "running" ? "Executing…" : status === "complete" ? "Ready" : status === "error" ? "Error" : "Idle"],
     ["Position", "Home"],
-    ["Tool", "Multimeter Probe"],
+    ["Tool", "Multimeter Positive Probe"],
     ["Last Task", "—"],
     ["Uptime", "2h 14m"],
   ];
@@ -854,8 +854,8 @@ function StepRow({ step }: { step: Step }) {
     const range = expected.min != null && expected.max != null ? ` (${expected.min}–${expected.max} ${expected.unit ?? ""})` : "";
     if (expected.nominal != null) meta.push(`Expected: ${expected.nominal} ${expected.unit ?? ""}${range}`);
   }
-  if (params.probe_positive) meta.push(`Probe+: ${params.probe_positive}`);
-  if (params.probe_negative) meta.push(`Probe−: ${params.probe_negative}`);
+  if (params.probe_positive) meta.push(`Probe+ (robot): ${params.probe_positive}`);
+  if (params.probe_negative) meta.push(`Probe− (fixed): ${params.probe_negative}`);
 
   return (
     <div className="flex items-start gap-3 p-3 rounded-lg border border-gray-100 border-l-4 border-l-teal-400 bg-white hover:bg-teal-50/30 transition-colors">
@@ -1013,11 +1013,9 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
     const probeStep = steps.find((s: Step) => ["PROBE", "MOVE", "MEASURE"].includes(s.action));
     if (!probeStep) return "";
     const pos = (probeStep.parameters as Record<string, string | undefined> | undefined)?.probe_positive;
-    const neg = (probeStep.parameters as Record<string, string | undefined> | undefined)?.probe_negative;
-    const parts = [pos, neg].filter(Boolean);
-    return parts.length
-      ? `Locate ${parts.join(" and ")} on the board, and the tip of the multimeter probe`
-      : `Locate the target component and the tip of the multimeter probe`;
+    return pos
+      ? `Locate ${pos} on the board, and the tip of the positive multimeter probe`
+      : `Locate the target component and the tip of the positive multimeter probe`;
   })();
 
   const referenceImages = (result?.search_results ?? []).flatMap((sr) =>
@@ -1061,7 +1059,7 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
           rows={2}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder={defaultPrompt || "e.g. locate the 5V LDO regulator and the multimeter probe tip"}
+          placeholder={defaultPrompt || "e.g. locate the 5V LDO regulator and the positive multimeter probe tip"}
         />
         <div className="flex items-center gap-3">
           <button

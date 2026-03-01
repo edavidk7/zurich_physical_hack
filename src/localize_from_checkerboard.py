@@ -66,9 +66,9 @@ import cv2
 import numpy as np
 
 try:
-    from src.constants import BOARD_ROWS, BOARD_COLS, WORKSPACE_PLANE_OFFSET_M
+    from src.constants import BOARD_ROWS, BOARD_COLS, BOARD_SQUARE_SIZE_MM, WORKSPACE_PLANE_OFFSET_M
 except ImportError:
-    from constants import BOARD_ROWS, BOARD_COLS, WORKSPACE_PLANE_OFFSET_M
+    from constants import BOARD_ROWS, BOARD_COLS, BOARD_SQUARE_SIZE_MM, WORKSPACE_PLANE_OFFSET_M
 
 # ---------------------------------------------------------------------------
 # Calibration
@@ -85,7 +85,7 @@ def load_calibration(
         cal = json.load(f)
     K    = np.array(cal["camera_matrix"], dtype=np.float64)
     dist = np.array(cal["dist_coeff"],    dtype=np.float64)
-    sq_m = cal["square_size_mm"] / 1000.0
+    sq_m = cal.get("square_size_mm", BOARD_SQUARE_SIZE_MM) / 1000.0
     rows = int(cal.get("board_rows", BOARD_ROWS))
     cols = int(cal.get("board_cols", BOARD_COLS))
     return K, dist, sq_m, (rows, cols)
