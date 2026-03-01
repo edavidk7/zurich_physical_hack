@@ -308,6 +308,28 @@ export async function locateKeypoints(
   });
 }
 
+export interface MoveToKeypointResult {
+  delta_cam_mm: { dx: number; dy: number };
+  delta_robot_m: { x: number; y: number; z: number };
+  distance_m: number;
+  cam_height_mm: number;
+  dry_run: boolean;
+  moved: boolean;
+  message: string;
+}
+
+export async function moveToKeypoint(
+  norm_y: number,
+  norm_x: number,
+  dryRun = false,
+): Promise<MoveToKeypointResult> {
+  return apiFetch<MoveToKeypointResult>("/api/robot/move-to-keypoint", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ norm_y: norm_y, norm_x: norm_x, dry_run: dryRun }),
+  });
+}
+
 export async function executeStepKeypoints(
   step: Record<string, unknown>,
   referenceImages: { doc_name: string; image_name: string }[],

@@ -1188,6 +1188,146 @@ async def locate_keypoints(req: KeypointRequest):
 
 
 # ---------------------------------------------------------------------------
+# Routes — Move to keypoint (simple open-loop)
+# ---------------------------------------------------------------------------
+
+
+class MoveToKeypointRequest(BaseModel):
+    norm_y: float  # keypoint Y in [0, 1000] normalized coords
+    norm_x: float  # keypoint X in [0, 1000] normalized coords
+    calib: str = "data/arm_cam_calib/calibration.json"
+    dry_run: bool = False
+
+
+@app.post("/api/robot/move-to-keypoint")
+async def move_to_keypoint(req: MoveToKeypointRequest):
+    """
+    Capture a camera frame, estimate pose via checkerboard, compute the
+    lateral movement needed to center on the given keypoint, and execute
+    the cartesian move on the robot.
+
+    This is a simple open-loop version: one shot, no VLM re-checking.
+    """
+    import io
+    import cv2
+    import numpy as np
+    from PIL import Image
+    from src.pose_estimation import estimate_camera_pose, compute_movement_to_keypoint
+
+    print(f"[move-to-kp] request: norm_y={req.norm_y:.1f}, norm_x={req.norm_x:.1f}, dry_run={req.dry_run}")
+
+    # 1. Capture frame
+    try:
+        cam = _get_camera()
+        loop = asyncio.get_event_loop()
+        jpeg_bytes = await loop.run_in_executor(None, cam.capture_jpeg)
+        camera_pil = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+        bgr = cv2.cvtColor(np.array(camera_pil), cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        print(f"[move-to-kp] camera error: {e}")
+        raise HTTPException(500, f"Camera error: {e}")
+
+    img_h, img_w = bgr.shape[:2]
+    print(f"[move-to-kp] captured frame {img_w}x{img_h}")
+
+    # 2. Estimate camera pose from checkerboard
+    try:
+        success, rvec, tvec, K, D = await asyncio.to_thread(
+            estimate_camera_pose, bgr, req.calib
+        )
+    except Exception as e:
+        print(f"[move-to-kp] pose estimation error: {e}")
+        raise HTTPException(500, f"Pose estimation error: {e}")
+
+    if not success:
+        print("[move-to-kp] checkerboard NOT detected")
+        raise HTTPException(
+            422, "Checkerboard not detected in frame — cannot estimate pose."
+        )
+
+    cam_height_mm = float(tvec.flatten()[2])
+    print(
+        f"[move-to-kp] pose OK — rvec={rvec.flatten().round(3).tolist()}, "
+        f"tvec={tvec.flatten().round(1).tolist()} mm, cam_height={cam_height_mm:.1f} mm"
+    )
+
+    # 3. Compute lateral movement delta (camera frame, mm)
+    delta_cam = await asyncio.to_thread(
+        compute_movement_to_keypoint,
+        req.norm_y, req.norm_x,
+        rvec, tvec, K, D,
+        img_w, img_h,
+    )
+
+    # Camera→robot frame mapping (straight-down mount)
+    dx_cam_mm, dy_cam_mm = float(delta_cam[0]), float(delta_cam[1])
+    delta_robot = np.array([
+        dy_cam_mm / 1000.0,
+        -dx_cam_mm / 1000.0,
+        0.0,
+    ])
+    dist_m = float(np.linalg.norm(delta_robot[:2]))
+
+    print(
+        f"[move-to-kp] delta_cam=({dx_cam_mm:.1f}, {dy_cam_mm:.1f}) mm  "
+        f"delta_robot=({delta_robot[0]*100:.2f}, {delta_robot[1]*100:.2f}, 0) cm  "
+        f"dist={dist_m*100:.2f} cm"
+    )
+
+    result = {
+        "delta_cam_mm": {"dx": dx_cam_mm, "dy": dy_cam_mm},
+        "delta_robot_m": {"x": float(delta_robot[0]), "y": float(delta_robot[1]), "z": 0.0},
+        "distance_m": dist_m,
+        "cam_height_mm": cam_height_mm,
+        "dry_run": req.dry_run,
+        "moved": False,
+    }
+
+    if dist_m < 0.001:
+        print("[move-to-kp] already centered, skipping move")
+        result["message"] = "Already centered on keypoint."
+        return result
+
+    if req.dry_run:
+        print(f"[move-to-kp] dry run — would move {dist_m*100:.1f} cm")
+        result["message"] = f"Dry run: would move {dist_m * 100:.1f} cm."
+        return result
+
+    # 4. Execute cartesian move via lerobot
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+    from move_arm_cartesian import cartesian_move, obs_to_q, ALL_JOINTS, PORT, ROBOT_ID, N_STEPS
+    from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
+    from lerobot.robots.so_follower.so_follower import SOFollower
+
+    try:
+        print(f"[move-to-kp] connecting robot on {PORT}…")
+        config = SOFollowerRobotConfig(port=PORT, id=ROBOT_ID)
+        robot = SOFollower(config)
+        robot.connect()
+
+        obs = await asyncio.to_thread(robot.get_observation)
+        q = obs_to_q(obs)
+        print(f"[move-to-kp] current joints (deg): {np.round(q, 1).tolist()}")
+
+        n_steps = max(N_STEPS, int(dist_m / 0.0025))
+        print(f"[move-to-kp] executing cartesian_move with {n_steps} steps…")
+        q = await asyncio.to_thread(cartesian_move, robot, q, delta_robot, n_steps)
+        print(f"[move-to-kp] move complete, final joints (deg): {np.round(q, 1).tolist()}")
+
+        robot.disconnect()
+        print("[move-to-kp] robot disconnected")
+    except Exception as e:
+        print(f"[move-to-kp] robot move error: {e}")
+        raise HTTPException(500, f"Robot move error: {e}")
+
+    result["moved"] = True
+    result["message"] = f"Moved {dist_m * 100:.1f} cm toward keypoint."
+    print(f"[move-to-kp] done — moved {dist_m*100:.1f} cm")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 

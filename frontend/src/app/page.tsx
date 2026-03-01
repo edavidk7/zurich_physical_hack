@@ -53,6 +53,7 @@ import {
   getDocumentContent,
   locateKeypoints,
   executeStepKeypoints,
+  moveToKeypoint,
   forwardKinematics,
   inverseKinematics,
   motorConnect,
@@ -62,7 +63,7 @@ import {
   motorSetSpeed,
   getTooltipProjection,
 } from "@/lib/api";
-import type { EEPosition, IKResult, TooltipProjection } from "@/lib/api";
+import type { EEPosition, IKResult, TooltipProjection, MoveToKeypointResult } from "@/lib/api";
 
 import type {
   DocumentsResponse,
@@ -1002,6 +1003,44 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
   const [error, setError] = useState("");
   const [kpResult, setKpResult] = useState<KeypointResponse | null>(null);
 
+  // Move-to-keypoint state
+  const [selectedKp, setSelectedKp] = useState<number | null>(null);
+  const [moveResult, setMoveResult] = useState<MoveToKeypointResult | null>(null);
+  const [movePlanning, setMovePlanning] = useState(false);
+  const [moveExecuting, setMoveExecuting] = useState(false);
+  const [moveError, setMoveError] = useState("");
+
+  async function handlePlanMove() {
+    if (selectedKp === null || !kpResult) return;
+    const kp = kpResult.keypoints[selectedKp];
+    setMovePlanning(true);
+    setMoveError("");
+    setMoveResult(null);
+    try {
+      const res = await moveToKeypoint(kp.point[0], kp.point[1], true);
+      setMoveResult(res);
+    } catch (e: unknown) {
+      setMoveError(e instanceof Error ? e.message : "Planning failed");
+    } finally {
+      setMovePlanning(false);
+    }
+  }
+
+  async function handleExecuteMove() {
+    if (selectedKp === null || !kpResult) return;
+    const kp = kpResult.keypoints[selectedKp];
+    setMoveExecuting(true);
+    setMoveError("");
+    try {
+      const res = await moveToKeypoint(kp.point[0], kp.point[1], false);
+      setMoveResult(res);
+    } catch (e: unknown) {
+      setMoveError(e instanceof Error ? e.message : "Move failed");
+    } finally {
+      setMoveExecuting(false);
+    }
+  }
+
   const defaultPrompt = (() => {
     const steps = result?.task_plan?.task_plan?.steps ?? [];
     const probeStep = steps.find((s: Step) => ["PROBE", "MOVE", "MEASURE"].includes(s.action));
@@ -1028,6 +1067,9 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
     setLoading(true);
     setError("");
     setKpResult(null);
+    setSelectedKp(null);
+    setMoveResult(null);
+    setMoveError("");
     try {
       const res = await locateKeypoints(p, referenceImages);
       setKpResult(res);
@@ -1093,26 +1135,107 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
           {kpResult.keypoints.length > 0 ? (
             <div>
               <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                Detected Keypoints ({kpResult.keypoints.length})
+                Detected Keypoints ({kpResult.keypoints.length}) &mdash; click one to plan a move
               </h4>
               <div className="space-y-2">
-                {kpResult.keypoints.map((kp, i) => (
-                  <div key={i} className="flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50">
-                    <span
-                      className="w-3 h-3 rounded-full flex-shrink-0 border-2"
-                      style={{ borderColor: KEYPOINT_COLORS[i % KEYPOINT_COLORS.length], backgroundColor: "black" }}
-                    />
-                    <span className="text-sm font-medium text-gray-800 flex-1">{kp.label}</span>
-                    <span className="text-xs text-gray-400 font-mono">
-                      norm ({kp.point[1]}, {kp.point[0]})
-                    </span>
-                  </div>
-                ))}
+                {kpResult.keypoints.map((kp, i) => {
+                  const isSelected = selectedKp === i;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => { setSelectedKp(i); setMoveResult(null); setMoveError(""); }}
+                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors text-left ${
+                        isSelected
+                          ? "border-teal-400 bg-teal-50 ring-2 ring-teal-300"
+                          : "border-gray-200 bg-gray-50 hover:border-teal-200 hover:bg-teal-50/50"
+                      }`}
+                    >
+                      <span
+                        className="w-3 h-3 rounded-full flex-shrink-0 border-2"
+                        style={{ borderColor: KEYPOINT_COLORS[i % KEYPOINT_COLORS.length], backgroundColor: isSelected ? KEYPOINT_COLORS[i % KEYPOINT_COLORS.length] : "black" }}
+                      />
+                      <span className="text-sm font-medium text-gray-800 flex-1">{kp.label}</span>
+                      <span className="text-xs text-gray-400 font-mono">
+                        norm ({kp.point[1]}, {kp.point[0]})
+                      </span>
+                      {isSelected && <Crosshair size={14} className="text-teal-600" />}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : (
             <div className="text-sm text-gray-400 text-center py-4">
               No keypoints detected &mdash; try rephrasing the prompt.
+            </div>
+          )}
+
+          {/* Move planning & execution panel */}
+          {selectedKp !== null && kpResult.keypoints[selectedKp] && (
+            <div className="space-y-3 border border-teal-200 rounded-xl p-4 bg-teal-50/50">
+              <h4 className="text-xs font-semibold text-teal-700 uppercase tracking-wide flex items-center gap-2">
+                <Move3d size={14} />
+                Move to: {kpResult.keypoints[selectedKp].label}
+              </h4>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handlePlanMove}
+                  disabled={movePlanning || moveExecuting}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+                >
+                  {movePlanning ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                  {movePlanning ? "Planning\u2026" : "Plan Move (Dry Run)"}
+                </button>
+
+                {moveResult && !moveResult.moved && moveResult.distance_m > 0.001 && (
+                  <button
+                    onClick={handleExecuteMove}
+                    disabled={moveExecuting}
+                    className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    {moveExecuting ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                    {moveExecuting ? "Moving\u2026" : "Execute Move"}
+                  </button>
+                )}
+              </div>
+
+              {moveError && (
+                <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                  {moveError}
+                </div>
+              )}
+
+              {moveResult && (
+                <div className="space-y-2 text-sm">
+                  <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${
+                    moveResult.moved
+                      ? "border-green-200 bg-green-50 text-green-700"
+                      : "border-blue-200 bg-blue-50 text-blue-700"
+                  }`}>
+                    {moveResult.moved ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+                    {moveResult.message}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
+                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
+                      <span className="text-gray-400">Distance:</span>{" "}
+                      <span className="font-mono font-medium">{(moveResult.distance_m * 100).toFixed(1)} cm</span>
+                    </div>
+                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
+                      <span className="text-gray-400">Cam height:</span>{" "}
+                      <span className="font-mono font-medium">{moveResult.cam_height_mm.toFixed(0)} mm</span>
+                    </div>
+                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
+                      <span className="text-gray-400">Robot dx:</span>{" "}
+                      <span className="font-mono font-medium">{(moveResult.delta_robot_m.x * 100).toFixed(2)} cm</span>
+                    </div>
+                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
+                      <span className="text-gray-400">Robot dy:</span>{" "}
+                      <span className="font-mono font-medium">{(moveResult.delta_robot_m.y * 100).toFixed(2)} cm</span>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
