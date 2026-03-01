@@ -18,14 +18,20 @@ TOOL_OFFSET_EE_M: list[float] = [0.059, 0.0, 0.0]
 
 # ── Camera mount ──────────────────────────────────────────────────────────────
 
-# Camera tilt around EE local Y axis (degrees).
-# Negative = tilts toward EE +X (forward); physical mount is –35°.
-# A positive value would point the camera backwards — wrong for this setup.
-CAM_TILT_EE_DEG: float = -35.0
+# Camera tilt applied as Rx(tilt_deg) in the camera frame, which rotates the
+# optical axis (cam +Z = EE +X at zero tilt) toward cam +Y (= EE +Z).
+# Positive = tilts optical axis downward toward the workspace (EE +Z direction).
+# Physical mount tilt is +35° (camera looks past the probe tip toward the board).
+CAM_TILT_EE_DEG: float = 35.0
 
 # Tooltip position measured in the camera frame (metres).
 # Used to derive the fixed camera-in-EE transform T_CAM_EE at startup.
 # Re-run robot_cam_calibration.py to update this after re-mounting the camera.
+#
+# WARNING: T_CAM_EE is very sensitive to these values.  A 1 mm error here
+# translates directly into a 1 mm translation error in the camera-EE frame,
+# which is amplified by the arm lever when transforming to robot base coords.
+# If camera-to-robot results are inaccurate, re-measure these first.
 TOOL_INTERSECT_DIST = 0.0115
 INTERSECT_TO_TIP = 0.0020
 INTERSECT_ANGLE = np.deg2rad(35)
@@ -65,6 +71,13 @@ ARUCO_SHEET_ROWS: int = 12  # rows on the sheet
 
 # Gap between adjacent markers on the sheet (millimetres).
 ARUCO_SHEET_GAP_MM: float = 4.5  # 0.45 cm
+
+# Set to False to exclude the gripper motor from all reads/writes (e.g. not connected).
+GRIPPER_ENABLED: bool = False
+
+# Number of ArUco markers (closest to image centre) used for pose estimation.
+# Using more markers gives more constraints but very-edge markers can hurt accuracy.
+ARUCO_POSE_K_MARKERS: int = 3
 
 # ── Camera capture ────────────────────────────────────────────────────────────
 

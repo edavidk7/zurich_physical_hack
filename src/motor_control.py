@@ -5,11 +5,15 @@ Wraps lerobot's FeetechMotorsBus to provide direct servo control.
 Supports connecting, reading positions, and writing goal positions.
 """
 
+import json
 import logging
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_CALIB_JSON = Path(__file__).parents[1] / "data/arm_cam_calib/motor_calibration.json"
 
 # Motor names and IDs matching the SO-ARM100 hardware
 MOTOR_NAMES = [
@@ -21,6 +25,83 @@ MOTOR_NAMES = [
     "gripper",
 ]
 MOTOR_IDS = [1, 2, 3, 4, 5, 6]
+
+# ---------------------------------------------------------------------------
+# Motor ↔ URDF angle conversions
+# ---------------------------------------------------------------------------
+# Formula:  urdf_deg = sign * motor_deg + offset_deg
+# Inverse:  motor_deg = sign * (urdf_deg - offset_deg)   [sign = ±1]
+#
+# Defaults are from the ArmSimulator.tsx empirical calibration.
+# Running calibrate_motor_offsets.py writes a JSON that overrides these.
+
+_DEFAULT_JOINT_CORRECTIONS: dict[str, tuple[int, float]] = {
+    # Formula:  urdf_deg = sign * motor_deg + offset_deg
+    #
+    # IMPORTANT: these defaults map motor-native degrees (raw=2048 → 0°) directly
+    # to backend URDF angles (lerobot's so-100.urdf, ranges ≈ ±90° per joint).
+    # The old values (shoulder_lift=104, elbow_flex=-80.5, wrist_flex=-43) were
+    # calibrated against the FRONTEND URDF which has completely different joint
+    # ranges ([0°,200°] for shoulder_lift vs the backend's [-90°,90°]), and caused
+    # FK inputs far outside the backend URDF limits → wrong EE position → wrong
+    # camera-to-robot transform.
+    #
+    # shoulder_pan sign=-1 is empirically verified (motor and URDF rotate opposite).
+    # All other offsets are 0 because the servo raw-center (raw=2048) approximately
+    # corresponds to the backend URDF joint zero for this arm.
+    #
+    # Run calibrate_motor_offsets.py to get per-unit precision values.
+    "shoulder_pan":  (-1,   -3.0),
+    "shoulder_lift": ( 1,    0.0),
+    "elbow_flex":    ( 1,    0.0),
+    "wrist_flex":    ( 1,    0.0),
+    "wrist_roll":    ( 1,    0.0),
+    "gripper":       ( 1,    0.0),
+}
+
+
+def _load_joint_corrections() -> dict[str, tuple[int, float]]:
+    """Load sign/offset per joint from JSON if available, else use defaults."""
+    if _CALIB_JSON.exists():
+        try:
+            with open(_CALIB_JSON) as f:
+                data = json.load(f)
+            corrections = dict(_DEFAULT_JOINT_CORRECTIONS)
+            for name, vals in data.items():
+                corrections[name] = (int(vals["sign"]), float(vals["offset_deg"]))
+            logger.info(f"Loaded motor calibration from {_CALIB_JSON}")
+            return corrections
+        except Exception as e:
+            logger.warning(f"Could not load {_CALIB_JSON}: {e} — using defaults")
+    return dict(_DEFAULT_JOINT_CORRECTIONS)
+
+
+# Loaded once at import time; restart server to pick up new calibration.
+_JOINT_CORRECTIONS: dict[str, tuple[int, float]] = _load_joint_corrections()
+
+
+def motor_to_urdf_deg(q_motor: dict) -> dict:
+    """Convert motor-native angles (degrees) → URDF/placo frame angles.
+
+    Gripper is passed through unchanged (not part of IK chain).
+    """
+    out = {}
+    for name in MOTOR_NAMES:
+        sign, offset = _JOINT_CORRECTIONS[name]
+        out[name] = sign * float(q_motor.get(name, 0.0)) + offset
+    return out
+
+
+def urdf_deg_to_motor(q_urdf: dict) -> dict:
+    """Convert URDF/placo frame angles → motor-native angles (degrees).
+
+    Inverse of motor_to_urdf_deg.
+    """
+    out = {}
+    for name in MOTOR_NAMES:
+        sign, offset = _JOINT_CORRECTIONS[name]
+        out[name] = sign * (float(q_urdf.get(name, 0.0)) - offset)
+    return out
 
 
 @dataclass
@@ -62,17 +143,17 @@ class SO100MotorController:
                 from lerobot.motors.feetech import FeetechMotorsBus
                 from lerobot.motors.motors_bus import MotorCalibration
 
+                from src.constants import GRIPPER_ENABLED
+
                 norm = MotorNormMode.DEGREES
+                # Only include gripper if enabled
+                active_names = MOTOR_NAMES[:5] if not GRIPPER_ENABLED else MOTOR_NAMES
+                active_ids   = MOTOR_IDS[:5]   if not GRIPPER_ENABLED else MOTOR_IDS
                 motors = {
                     name: Motor(mid, "sts3215", norm)
-                    for name, mid in zip(MOTOR_NAMES[:5], MOTOR_IDS[:5])
+                    for name, mid in zip(active_names, active_ids)
                 }
-                # Gripper uses 0-100 range normalization
-                motors["gripper"] = Motor(6, "sts3215", MotorNormMode.RANGE_0_100)
 
-                # Default calibration: full STS3215 range (0-4095).
-                # DEGREES: 0° = raw 2048 (midpoint), ±180° = full range
-                # RANGE_0_100: 0% = raw 0, 100% = raw 4095
                 calibration = {
                     name: MotorCalibration(
                         id=mid,
@@ -81,7 +162,7 @@ class SO100MotorController:
                         range_min=0,
                         range_max=4095,
                     )
-                    for name, mid in zip(MOTOR_NAMES, MOTOR_IDS)
+                    for name, mid in zip(active_names, active_ids)
                 }
 
                 self._bus = FeetechMotorsBus(
@@ -163,15 +244,18 @@ class SO100MotorController:
 
     def read_positions(self) -> dict:
         """Read current joint positions in degrees."""
+        from src.constants import GRIPPER_ENABLED
         with self._lock:
             if not self.is_connected:
                 return {"error": "Not connected to robot"}
             try:
                 positions = self._bus.sync_read("Present_Position")
+                pos_deg = {k: float(v) for k, v in positions.items()}
+                if not GRIPPER_ENABLED:
+                    pos_deg["gripper"] = 0.0  # report 0 when disabled
                 return {
-                    "positions_deg": {k: float(v) for k, v in positions.items()},
-                    "positions_list": [float(positions.get(n, 0.0)) for n in MOTOR_NAMES[:5]]
-                    + [float(positions.get("gripper", 0.0))],
+                    "positions_deg": pos_deg,
+                    "positions_list": [float(pos_deg.get(n, 0.0)) for n in MOTOR_NAMES],
                 }
             except Exception as e:
                 logger.error(f"Read error: {e}")
@@ -252,7 +336,9 @@ class SO100MotorController:
             return {"error": f"Expected 6 joint values, got {len(joints_deg)}"}
         if speed is not None:
             self.set_speed(speed)
-        pos = {name: val for name, val in zip(MOTOR_NAMES, joints_deg)}
+        from src.constants import GRIPPER_ENABLED
+        names = MOTOR_NAMES[:5] if not GRIPPER_ENABLED else MOTOR_NAMES
+        pos = {name: val for name, val in zip(names, joints_deg)}
         return self.write_positions(pos)
 
     def enable_torque(self) -> dict:

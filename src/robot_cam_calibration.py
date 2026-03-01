@@ -30,17 +30,21 @@ The rotation R_cam_ee (how EE-frame axes look in camera frame) must come from:
   b) Multiple tip observations at different EE orientations (see calibrate_R_cam_ee())
   c) Approximate from known constraints
 
-SO-101 physical setup (confirmed from hardware photos + kinematic diagram):
-  - Tool (probe) extends along EE +X (red axis)  →  tool_offset_ee = [0.054, 0, 0]
-  - Camera is mounted on a bracket above the EE, tilted 35° around EE local Y
-    toward EE +X (forward).  In right-hand Rodrigues around EE Y this is -35°:
-      R_cam_ee = Ry(-35°) = [[cos35, 0, -sin35], [0, 1, 0], [sin35, 0, cos35]]
-    Ry(-35°) makes the camera look FORWARD (+EE X direction) and DOWN (+EE Z),
-    which matches the physical photo.  Ry(+35°) would look BACKWARD — wrong.
+SO-101 physical setup (confirmed from MuJoCo sim RGB=XYZ on Fixed_Jaw frame):
+  - Tool (probe) extends along EE +X (red axis)  →  tool_offset_ee = [0.059, 0, 0]
+  - EE frame axes at zero config: +X = forward (probe), +Y = up, +Z = right
+  - Camera frame (OpenCV): +X = right, +Y = down, +Z = optical axis (forward)
+  - Camera is mounted on top of the EE, looking roughly along EE +X
+    (forward) and tilted 35° downward (from EE +X toward EE +Z / workspace).
+  - R_cam_ee is composed of:
+      a) A base frame rotation that maps EE axes → camera axes when the
+         camera optical axis is aligned with EE +X (no tilt):
+         cam +Z = EE +X, cam +Y = EE +Z, cam +X = EE +Y
+      b) An Rx(+35°) pitch that tilts the optical axis downward toward workspace
 
 Default constants (use these unless you re-calibrate):
-  TOOL_OFFSET_EE = np.array([0.054, 0.0, 0.0])   # metres, along EE +X
-  R_CAM_EE       = Ry(-35°)                       # see make_R_cam_ee() below
+  TOOL_OFFSET_EE = np.array([0.059, 0.0, 0.0])   # metres, along EE +X
+  R_CAM_EE       = Rx(+35°) @ R_base             # see make_R_cam_ee() below
 
 Once T_cam_ee is known, the full pipeline is:
   1.  Read joint angles  →  T_ee_robot = FK(q)
@@ -91,22 +95,67 @@ def make_R_cam_ee(tilt_deg: float = CAM_TILT_EE_DEG) -> np.ndarray:
     """
     Build R_cam_ee for the SO-101 wrist camera.
 
-    The camera is tilted `tilt_deg` degrees around EE local Y from the EE Z
-    direction (toward EE +X / forward).  Physical default is -35°:
-      - Negative because rotating toward +EE X from +EE Z is a negative Ry
-        rotation in right-hand convention.
-      - Result: camera looks FORWARD (along probe direction) and DOWN.
+    R_cam_ee transforms vectors from the EE (Fixed_Jaw) frame to the camera
+    frame (OpenCV convention: X-right, Y-down, Z-forward/optical-axis).
 
-    Returns a 3×3 rotation matrix that transforms EE-frame vectors to
-    camera-frame vectors.
+    Physical setup (SO-101, confirmed from MuJoCo sim RGB=XYZ axes):
+      - EE frame at zero config:  +X = forward (probe), +Y = up, +Z = right
+        (from the kinematic diagram: red=X along probe, green=Y up, blue=Z right)
+      - Camera is mounted on top of the EE wrist, looking roughly along +EE X
+        (forward / probe direction) and tilted ``tilt_deg`` degrees downward
+        toward the workspace (from EE +X toward EE +Z).
+
+    Construction:
+      1. Base alignment (no tilt): camera axes vs EE axes when the camera
+         optical axis is exactly aligned with EE +X:
+           cam +Z (forward)  = EE +X (forward / probe direction)
+           cam +Y (down)     = EE +Z
+           cam +X (right)    = EE +Y (from right-hand rule: EE_Y × EE_Z = EE_X)
+         This gives R_base = [[ 0,  1,  0],
+                              [ 0,  0,  1],
+                              [ 1,  0,  0]]
+
+      2. Apply a pitch of ``tilt_deg`` around the *camera* X-axis (= EE +Y).
+         Positive tilt rotates cam +Z toward cam +Y, i.e., tilts the optical
+         axis downward from EE +X toward EE +Z (toward the workspace):
+           R_tilt = Rx(tilt_deg)
+
+      3. Final: R_cam_ee = R_tilt @ R_base
+
+    Returns a 3×3 rotation matrix (proper, det=+1).
     """
-    theta = np.deg2rad(tilt_deg)
-    # Standard Ry(θ): rotates +Z toward +X for positive θ
-    return np.array([
-        [ np.cos(theta), 0, np.sin(theta)],
-        [ 0,             1, 0            ],
-        [-np.sin(theta), 0, np.cos(theta)],
-    ])
+    # Base alignment: map EE frame to camera frame (no tilt)
+    #   cam_X = +ee_Y,  cam_Y = +ee_Z,  cam_Z = +ee_X
+    #   Right-hand check: ee_Y x ee_Z = ee_X  <=>  cam_X x cam_Y = cam_Z  ✓
+    #
+    # Confirmed from MuJoCo sim (RGB=XYZ on Fixed_Jaw) + physical mount:
+    #   - Camera optical axis (cam +Z) = EE +X (probe/forward direction)
+    #   - Camera down (cam +Y) = EE +Z
+    #   - Camera right (cam +X) = EE +Y (by right-hand rule)
+    #   - Camera is tilted 35° downward (from EE+X toward EE+Z) around cam X axis
+    R_base = np.array(
+        [
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 0, 0],
+        ],
+        dtype=float,
+    )
+
+    # Pitch around camera X-axis (= EE +Y) by tilt_deg.
+    # Positive = tilt optical axis downward (from EE +X toward EE +Z / workspace).
+    # Default +35° means the camera looks past the probe tip toward the board.
+    alpha = np.deg2rad(tilt_deg)
+    R_tilt = np.array(
+        [
+            [1, 0, 0],
+            [0, np.cos(alpha), -np.sin(alpha)],
+            [0, np.sin(alpha), np.cos(alpha)],
+        ],
+        dtype=float,
+    )
+
+    return R_tilt @ R_base
 
 
 #: Default camera-in-EE rotation for the SO-101 wrist camera
@@ -116,19 +165,21 @@ R_CAM_EE_DEFAULT: np.ndarray = make_R_cam_ee(CAM_TILT_EE_DEG)
 #: Constant because both camera and tool are rigidly attached to the EE.
 P_TIP_CAM: np.ndarray = np.array(P_TIP_CAM_M)
 
+
 # Pre-compute the fixed camera-in-EE transform from the known constants.
 # This never needs to be recomputed at runtime — just use T_CAM_EE directly.
 def _make_T_cam_ee() -> np.ndarray:
     t = P_TIP_CAM - R_CAM_EE_DEFAULT @ TOOL_OFFSET_EE
     T = np.eye(4)
     T[:3, :3] = R_CAM_EE_DEFAULT
-    T[:3,  3] = t
+    T[:3, 3] = t
     return T
+
 
 #: Fixed 4×4 camera-in-EE transform.
 #: T_CAM_EE transforms EE-frame points to camera-frame points:
 #:   p_cam = T_CAM_EE @ [p_ee; 1]
-#: Camera origin in EE frame: [-44.2, +20.5, +93.4] mm
+#: Camera origin in EE frame: [+48.8, -1.0, +8.4] mm  (mostly along EE +X)
 T_CAM_EE: np.ndarray = _make_T_cam_ee()
 
 #: Inverse: EE-in-camera transform (precomputed for speed)
@@ -139,11 +190,12 @@ T_EE_CAM: np.ndarray = np.linalg.inv(T_CAM_EE)
 # Core math
 # ---------------------------------------------------------------------------
 
+
 def calibrate_T_cam_ee(
     q_deg: dict[str, float],
     p_tip_cam: np.ndarray,
     tool_offset_ee: np.ndarray,
-    solver,                         # SO101IKSolver instance
+    solver,  # SO101IKSolver instance
     R_cam_ee: np.ndarray | None = None,
 ) -> np.ndarray:
     """
@@ -166,9 +218,13 @@ def calibrate_T_cam_ee(
     -------
     T_cam_ee : (4,4) ndarray — fixed camera-in-EE transform
     """
-    p_tip_cam      = np.asarray(p_tip_cam,      dtype=float)
+    p_tip_cam = np.asarray(p_tip_cam, dtype=float)
     tool_offset_ee = np.asarray(tool_offset_ee, dtype=float)
-    R_cam_ee       = np.eye(3, dtype=float) if R_cam_ee is None else np.asarray(R_cam_ee, dtype=float)
+    R_cam_ee = (
+        np.eye(3, dtype=float)
+        if R_cam_ee is None
+        else np.asarray(R_cam_ee, dtype=float)
+    )
 
     # Translation: camera origin in EE frame when tip is at known position
     # Constraint: p_tip_cam = R_cam_ee @ tool_offset_ee + t_cam_ee
@@ -176,7 +232,7 @@ def calibrate_T_cam_ee(
 
     T_cam_ee = np.eye(4)
     T_cam_ee[:3, :3] = R_cam_ee
-    T_cam_ee[:3,  3] = t_cam_ee
+    T_cam_ee[:3, 3] = t_cam_ee
 
     return T_cam_ee
 
@@ -204,8 +260,8 @@ def compute_T_robot_cam(
     -------
     T_robot_cam : (4,4) ndarray — transforms camera-frame points to robot-base frame
     """
-    T_ee_robot  = solver.fk(q_deg)
-    T_ee_cam_   = T_EE_CAM if T_cam_ee is None else np.linalg.inv(T_cam_ee)
+    T_ee_robot = solver.fk(q_deg)
+    T_ee_cam_ = T_EE_CAM if T_cam_ee is None else np.linalg.inv(T_cam_ee)
     return T_ee_robot @ T_ee_cam_
 
 
@@ -221,6 +277,7 @@ def cam_to_robot(
 # ---------------------------------------------------------------------------
 # Multi-pose rotation calibration (optional, for accurate R_cam_ee)
 # ---------------------------------------------------------------------------
+
 
 def calibrate_R_cam_ee(
     observations: list[tuple[dict, np.ndarray, np.ndarray]],
@@ -277,31 +334,31 @@ def calibrate_R_cam_ee(
     # With 3 linearly independent deltas → R_cam_robot via least-squares.
 
     n = len(observations)
-    A = np.zeros((3 * (n - 1), 3))   # columns of R_cam_robot to solve for
+    A = np.zeros((3 * (n - 1), 3))  # columns of R_cam_robot to solve for
     b = np.zeros(3 * (n - 1))
 
     q0, c0, off0 = observations[0]
     T0 = solver.fk(q0)
-    p0_robot = (T0 @ np.append(off0, 1.0))[:3]   # tip in robot base at pose 0
+    p0_robot = (T0 @ np.append(off0, 1.0))[:3]  # tip in robot base at pose 0
 
     for i, (qi, ci, offi) in enumerate(observations[1:]):
-        Ti      = solver.fk(qi)
+        Ti = solver.fk(qi)
         pi_robot = (Ti @ np.append(offi, 1.0))[:3]
 
-        delta_robot = pi_robot - p0_robot     # (3,) in robot base
-        delta_cam   = ci - c0                 # (3,) in camera
+        delta_robot = pi_robot - p0_robot  # (3,) in robot base
+        delta_cam = ci - c0  # (3,) in camera
 
         # delta_cam = R_cam_robot @ delta_robot  →  solve for R_cam_robot
         row = slice(i * 3, i * 3 + 3)
         # We fill a big Ax=b where x is R_cam_robot column-stacked
         # Using Kronecker form:  vec(delta_cam) = (delta_robot.T ⊗ I) vec(R_cam_robot)
-        A[row] = np.kron(delta_robot.T, np.eye(3)).reshape(3, 9)[:, :3]   # simplified
+        A[row] = np.kron(delta_robot.T, np.eye(3)).reshape(3, 9)[:, :3]  # simplified
         # Actually let's just build the column-by-column system
         # We do this in one shot below
 
     # Simpler least-squares:  for each axis, solve R_cam_robot @ D = C
-    D = np.zeros((3, n - 1))   # deltas in robot base (columns)
-    C = np.zeros((3, n - 1))   # deltas in camera (columns)
+    D = np.zeros((3, n - 1))  # deltas in robot base (columns)
+    C = np.zeros((3, n - 1))  # deltas in camera (columns)
     q0, c0, off0 = observations[0]
     T0 = solver.fk(q0)
     p0_robot = (T0 @ np.append(off0, 1.0))[:3]
@@ -360,54 +417,80 @@ def load_T_cam_ee(path: str | Path = _DEFAULT_SAVE_PATH) -> np.ndarray:
 if __name__ == "__main__":
     import argparse
     import sys
+
     sys.path.insert(0, str(Path(__file__).parent))
     from ik_solver import SO101IKSolver
 
-    ap = argparse.ArgumentParser(description="Calibrate camera-robot transform from tip observation")
-    ap.add_argument("--q", nargs=6, type=float, required=True,
-                    metavar=("PAN","LIFT","ELBOW","WFLEX","WROLL","GRIP"),
-                    help="Joint angles in degrees (shoulder_pan lift elbow wrist_flex wrist_roll gripper)")
-    ap.add_argument("--tip-cam", nargs=3, type=float, required=True,
-                    metavar=("X","Y","Z"),
-                    help="Tooltip position in camera frame (metres)")
-    ap.add_argument("--tool-offset", nargs=3, type=float, required=True,
-                    metavar=("X","Y","Z"),
-                    help="Tooltip offset in EE (Fixed_Jaw) frame (metres), e.g. 0 -0.054 0")
-    ap.add_argument("--save", default=str(_DEFAULT_SAVE_PATH),
-                    help="Path to save T_cam_ee JSON")
+    ap = argparse.ArgumentParser(
+        description="Calibrate camera-robot transform from tip observation"
+    )
+    ap.add_argument(
+        "--q",
+        nargs=6,
+        type=float,
+        required=True,
+        metavar=("PAN", "LIFT", "ELBOW", "WFLEX", "WROLL", "GRIP"),
+        help="Joint angles in degrees (shoulder_pan lift elbow wrist_flex wrist_roll gripper)",
+    )
+    ap.add_argument(
+        "--tip-cam",
+        nargs=3,
+        type=float,
+        required=True,
+        metavar=("X", "Y", "Z"),
+        help="Tooltip position in camera frame (metres)",
+    )
+    ap.add_argument(
+        "--tool-offset",
+        nargs=3,
+        type=float,
+        required=True,
+        metavar=("X", "Y", "Z"),
+        help="Tooltip offset in EE (Fixed_Jaw) frame (metres), e.g. 0 -0.054 0",
+    )
+    ap.add_argument(
+        "--save", default=str(_DEFAULT_SAVE_PATH), help="Path to save T_cam_ee JSON"
+    )
     args = ap.parse_args()
 
-    motors = ["shoulder_pan","shoulder_lift","elbow_flex","wrist_flex","wrist_roll","gripper"]
-    q_deg  = dict(zip(motors, args.q))
+    motors = [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll",
+        "gripper",
+    ]
+    q_deg = dict(zip(motors, args.q))
 
     solver = SO101IKSolver()
-    T_ee   = solver.fk(q_deg)
+    T_ee = solver.fk(q_deg)
 
     T_cam_ee = calibrate_T_cam_ee(
-        q_deg          = q_deg,
-        p_tip_cam      = np.array(args.tip_cam),
-        tool_offset_ee = np.array(args.tool_offset),
-        solver         = solver,
+        q_deg=q_deg,
+        p_tip_cam=np.array(args.tip_cam),
+        tool_offset_ee=np.array(args.tool_offset),
+        solver=solver,
     )
 
     # Verify: tip in robot base from FK vs from camera transform
     T_robot_cam = compute_T_robot_cam(q_deg, solver, T_cam_ee)
-    p_tip_cam   = np.array(args.tip_cam)
+    p_tip_cam = np.array(args.tip_cam)
     p_tip_robot_from_cam = cam_to_robot(p_tip_cam, T_robot_cam)
-    p_tip_robot_from_fk  = (T_ee @ np.append(args.tool_offset, 1.0))[:3]
+    p_tip_robot_from_fk = (T_ee @ np.append(args.tool_offset, 1.0))[:3]
 
     print("\n" + "=" * 55)
     print("  Camera-Robot Calibration from Tip Observation")
     print("=" * 55)
-    print(f"  Tool tip in camera frame  : {np.array(args.tip_cam)*1000} mm")
-    print(f"  Tool offset in EE frame   : {np.array(args.tool_offset)*1000} mm")
+    print(f"  Tool tip in camera frame  : {np.array(args.tip_cam) * 1000} mm")
+    print(f"  Tool offset in EE frame   : {np.array(args.tool_offset) * 1000} mm")
     print()
-    print(f"  EE position in robot base : {T_ee[:3,3]*1000} mm")
+    print(f"  EE position in robot base : {T_ee[:3, 3] * 1000} mm")
     print()
-    print(f"  Tip in robot base (FK)    : {p_tip_robot_from_fk*1000} mm")
-    print(f"  Tip in robot base (cam→R) : {p_tip_robot_from_cam*1000} mm")
+    print(f"  Tip in robot base (FK)    : {p_tip_robot_from_fk * 1000} mm")
+    print(f"  Tip in robot base (cam→R) : {p_tip_robot_from_cam * 1000} mm")
     diff = np.linalg.norm(p_tip_robot_from_cam - p_tip_robot_from_fk)
-    print(f"  Consistency error         : {diff*1000:.3f} mm")
+    print(f"  Consistency error         : {diff * 1000:.3f} mm")
     print()
     print("  T_cam_ee (camera in EE frame):")
     print("  ", T_cam_ee)

@@ -67,6 +67,7 @@ try:
         ARUCO_SHEET_COLS,
         ARUCO_SHEET_GAP_MM,
         ARUCO_SHEET_ROWS,
+        ARUCO_POSE_K_MARKERS,
         WORKSPACE_PLANE_OFFSET_M,
     )
 except ImportError:
@@ -75,6 +76,7 @@ except ImportError:
         ARUCO_SHEET_COLS,
         ARUCO_SHEET_GAP_MM,
         ARUCO_SHEET_ROWS,
+        ARUCO_POSE_K_MARKERS,
         WORKSPACE_PLANE_OFFSET_M,
     )
 
@@ -96,6 +98,24 @@ def load_calibration(
         cal = json.load(f)
     K = np.array(cal["camera_matrix"], dtype=np.float64)
     dist = np.array(cal["dist_coeff"], dtype=np.float64)
+
+    # Sanity-check: warn if principal point is exactly at the image centre,
+    # which often indicates the intrinsics were guessed rather than calibrated.
+    img_sz = cal.get("image_size_px")
+    if img_sz is not None:
+        w, h = img_sz
+        if K[0, 2] == w / 2.0 and K[1, 2] == h / 2.0:
+            import warnings
+
+            warnings.warn(
+                f"Camera principal point (cx={K[0, 2]}, cy={K[1, 2]}) is exactly "
+                f"at the image centre ({w / 2}, {h / 2}). This may indicate the "
+                f"intrinsics in {path} are approximate/guessed rather than "
+                f"properly calibrated. Re-run intrinsic calibration for best "
+                f"accuracy.",
+                stacklevel=2,
+            )
+
     marker_m = cal.get("aruco_marker_size_mm", ARUCO_MARKER_SIZE_MM) / 1000.0
     gap_m = cal.get("aruco_sheet_gap_mm", ARUCO_SHEET_GAP_MM) / 1000.0
     return K, dist, marker_m, gap_m
@@ -242,17 +262,28 @@ def _pick_centre_marker(
     image_shape: tuple[int, ...],
 ) -> DetectedMarker:
     """Return the marker whose centre is closest to the image centre."""
+    return _pick_k_centre_markers(markers, image_shape, k=1)[0]
+
+
+def _pick_k_centre_markers(
+    markers: list[DetectedMarker],
+    image_shape: tuple[int, ...],
+    k: int = ARUCO_POSE_K_MARKERS,
+) -> list[DetectedMarker]:
+    """Return the k markers whose centres are closest to the image centre.
+
+    If fewer than k markers are detected, returns all of them.
+    """
     img_h, img_w = image_shape[:2]
     cx, cy = img_w / 2.0, img_h / 2.0
-    best = markers[0]
-    best_dist = float("inf")
-    for m in markers:
-        mc = m.corners_px.mean(axis=0)
-        d = (mc[0] - cx) ** 2 + (mc[1] - cy) ** 2
-        if d < best_dist:
-            best_dist = d
-            best = m
-    return best
+    scored = sorted(
+        markers,
+        key=lambda m: float(
+            (m.corners_px.mean(axis=0)[0] - cx) ** 2
+            + (m.corners_px.mean(axis=0)[1] - cy) ** 2
+        ),
+    )
+    return scored[: max(1, k)]
 
 
 def solve_pose_single(
@@ -383,12 +414,19 @@ def solve_pose_multi(
     R, _ = cv2.Rodrigues(rvec)
     t = tvec.ravel()
 
-    # Ensure board is in front of camera
+    # Ensure board is in front of camera.
+    # If solvePnP returns the board behind the camera (t_z < 0), the pose
+    # needs a 180° rotation about an axis in the board plane, NOT a simple
+    # negation of R (which produces det(R)=-1, an improper reflection).
+    # The correct fix: negate the rvec (equivalent to rotating the pose 180°
+    # about the camera origin) and recompute R and t.
     if t[2] < 0:
-        t = -t
-        R = -R
+        rvec = -rvec
+        tvec = -tvec
+        R, _ = cv2.Rodrigues(rvec)
+        t = tvec.ravel()
 
-    # Reprojection error
+    # Reprojection error (uses the corrected rvec/tvec)
     proj, _ = cv2.projectPoints(obj_pts, rvec, tvec, K, dist)
     proj = proj.reshape(-1, 2)
     gt = img_pts.reshape(-1, 2)
@@ -567,15 +605,25 @@ def localize_keypoint(
         if image_bgr is None:
             raise FileNotFoundError(f"Cannot load image: {image}")
 
-    markers = detect_markers(image_bgr, marker_id=marker_id, visualize=visualize)
+    all_markers = detect_markers(image_bgr, marker_id=marker_id, visualize=visualize)
 
     print(
-        f"[localize_keypoint] Detected {len(markers)} marker(s): "
-        f"{[m.marker_id for m in markers]}"
+        f"[localize_keypoint] Detected {len(all_markers)} marker(s): "
+        f"{[m.marker_id for m in all_markers]}"
     )
 
+    # Use only the K markers closest to the image centre for pose estimation.
+    # This avoids perspective distortion from markers at the image edges.
+    pose_markers = _pick_k_centre_markers(all_markers, image_bgr.shape)
+    if len(pose_markers) < len(all_markers):
+        print(
+            f"[localize_keypoint] Using {len(pose_markers)} of {len(all_markers)} "
+            f"markers for pose (closest to centre): "
+            f"{[m.marker_id for m in pose_markers]}"
+        )
+
     pose = solve_pose_multi(
-        markers,
+        pose_markers,
         marker_m,
         gap_m,
         K,
@@ -585,7 +633,7 @@ def localize_keypoint(
 
     result = pixel_to_3d(keypoint_px, K, dist, pose, plane_offset_m)
     result["pose"] = pose
-    result["detected_markers"] = markers  # all detected markers for annotation
+    result["detected_markers"] = all_markers  # ALL detected markers for annotation
 
     if save_annotated:
         img = image_bgr.copy()
@@ -599,7 +647,7 @@ def localize_keypoint(
             cv2.aruco.drawDetectedMarkers(img, corners_list, ids)
 
         # Highlight the marker(s) used for the pose
-        for m in markers:
+        for m in pose_markers:
             pts = m.corners_px.astype(np.int32)
             cv2.polylines(img, [pts], True, (255, 255, 0), 3)
             cx, cy = pts.mean(axis=0).astype(int)

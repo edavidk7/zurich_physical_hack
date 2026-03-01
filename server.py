@@ -635,6 +635,7 @@ async def forward_kinematics(req: FKRequest):
     T = solver.fk(q_deg)
     pos = T[:3, 3]
     R = T[:3, :3]
+    tip = pos + R @ solver.tool_offset
     # Extract RPY (ZYX convention) from rotation matrix
     pitch = float(np.arcsin(-R[2, 0]))
     cy = np.cos(pitch)
@@ -659,6 +660,7 @@ async def forward_kinematics(req: FKRequest):
     )
     print(
         f"[FK] EE pos = ({pos[0] * 1000:.1f}, {pos[1] * 1000:.1f}, {pos[2] * 1000:.1f}) mm  "
+        f"tip = ({tip[0] * 1000:.1f}, {tip[1] * 1000:.1f}, {tip[2] * 1000:.1f}) mm  "
         f"RPY = ({roll_d:.1f}°, {pitch_d:.1f}°, {yaw_d:.1f}°)"
         + (f"  violations={violations}" if violations else "")
     )
@@ -670,6 +672,11 @@ async def forward_kinematics(req: FKRequest):
             "roll_deg": roll_d,
             "pitch_deg": pitch_d,
             "yaw_deg": yaw_d,
+        },
+        "tip_position": {
+            "x": float(tip[0]),
+            "y": float(tip[1]),
+            "z": float(tip[2]),
         },
         "joint_violations": violations,
     }
@@ -1402,6 +1409,7 @@ async def run_step(req: RunStepRequest):
     )
     from src.robot_cam_calibration import compute_T_robot_cam, cam_to_robot
     from src.constants import P_TIP_CAM_M
+    from src.motor_control import motor_to_urdf_deg, urdf_deg_to_motor
 
     global _pending_move
 
@@ -1552,39 +1560,73 @@ async def run_step(req: RunStepRequest):
     if "error" in motor_result:
         raise HTTPException(500, f"Motor read error: {motor_result['error']}")
 
-    q_current_deg: dict[str, float] = motor_result["positions_deg"]
+    q_current_motor: dict[str, float] = motor_result["positions_deg"]
     print(
-        f"[run-step] current joints: { {k: round(v, 1) for k, v in q_current_deg.items()} }"
+        f"[run-step] current joints (motor): { {k: round(v, 1) for k, v in q_current_motor.items()} }"
+    )
+
+    # Convert motor-native → URDF/placo frame for FK and IK
+    q_current_urdf = motor_to_urdf_deg(q_current_motor)
+    print(
+        f"[run-step] current joints (urdf):  { {k: round(v, 1) for k, v in q_current_urdf.items()} }"
     )
 
     solver = get_ik_solver()
-    T_robot_cam = compute_T_robot_cam(q_current_deg, solver)
+    T_robot_cam = compute_T_robot_cam(q_current_urdf, solver)
     target_robot = cam_to_robot(pos_cam_m, T_robot_cam)
-    print(f"[run-step] target in robot frame: {target_robot}")
 
-    # Also compute current tip position for logging/display
-    current_tip = solver.current_tip_pos(q_current_deg)
+    # Current tip position (in URDF/robot frame)
+    current_tip = solver.current_tip_pos(q_current_urdf)
     delta = target_robot - current_tip
     dist_m = float(np.linalg.norm(delta))
+
+    # ── Diagnostic: print full transform chain for calibration verification ──
+    T_ee = solver.fk(q_current_urdf)
+    ee_pos_mm = T_ee[:3, 3] * 1000
+    cam_origin_robot_mm = T_robot_cam[:3, 3] * 1000
     print(
-        f"[run-step] current tip: {current_tip}, delta: {delta}, dist: {dist_m:.4f} m"
+        f"[run-step] FK EE pos (robot frame):  ({ee_pos_mm[0]:.1f}, {ee_pos_mm[1]:.1f}, {ee_pos_mm[2]:.1f}) mm"
+    )
+    print(
+        f"[run-step] Camera origin (robot frame): ({cam_origin_robot_mm[0]:.1f}, {cam_origin_robot_mm[1]:.1f}, {cam_origin_robot_mm[2]:.1f}) mm"
+    )
+    print(
+        f"[run-step] Target in camera frame: ({pos_cam_m[0]*1000:.1f}, {pos_cam_m[1]*1000:.1f}, {pos_cam_m[2]*1000:.1f}) mm"
+    )
+    print(
+        f"[run-step] Target in robot frame:  ({target_robot[0]*1000:.1f}, {target_robot[1]*1000:.1f}, {target_robot[2]*1000:.1f}) mm"
+    )
+    print(
+        f"[run-step] Current tip:  ({current_tip[0]*1000:.1f}, {current_tip[1]*1000:.1f}, {current_tip[2]*1000:.1f}) mm"
+    )
+    print(
+        f"[run-step] Delta: ({delta[0]*1000:.1f}, {delta[1]*1000:.1f}, {delta[2]*1000:.1f}) mm   dist={dist_m*1000:.1f} mm"
     )
 
-    # ── 8. Solve IK ──────────────────────────────────────────────────────
+    # ── 8. Solve IK (in URDF space) ──────────────────────────────────────
     try:
-        q_target_deg = solver.ik(q_current_deg, target_robot)
+        q_target_urdf = solver.ik(q_current_urdf, target_robot)
     except Exception as e:
         raise HTTPException(500, f"IK solver error: {e}")
 
     # Verify IK solution
-    achieved_tip = solver.current_tip_pos(q_target_deg)
+    achieved_tip = solver.current_tip_pos(q_target_urdf)
     ik_error_m = float(np.linalg.norm(achieved_tip - target_robot))
     print(f"[run-step] IK solution tip: {achieved_tip}, error: {ik_error_m:.5f} m")
 
-    # ── 9. Plan motion trajectory ────────────────────────────────────────
-    trajectory = solver.plan_motion(
-        q_current_deg, q_target_deg, n_steps=req.motion_steps
+    # Convert IK result back to motor-native for execution
+    q_target_motor = urdf_deg_to_motor(q_target_urdf)
+
+    # ── 9. Plan motion trajectory (URDF space → convert each step to motor) ─
+    traj_urdf = solver.plan_motion(
+        q_current_urdf, q_target_urdf, n_steps=req.motion_steps
     )
+    # Convert every waypoint to motor-native so confirm_move can write directly
+    trajectory = [urdf_deg_to_motor(wp) for wp in traj_urdf]
+
+    # Alias for response/logging (motor-native target)
+    q_current_deg = q_current_motor
+    q_target_deg = q_target_motor
 
     # ── 10. Store as pending move ────────────────────────────────────────
     pending = {

@@ -90,11 +90,29 @@ _CALIB_PATH = Path(__file__).parents[1] / "data/arm_cam_calib/calibration.json"
 def load_calibration(
     path: str | Path = _CALIB_PATH,
 ) -> tuple[np.ndarray, np.ndarray, float, tuple[int, int]]:
-    """Return (K 3×3, dist 1×5, square_size_m, board_shape (rows, cols))."""
+    """Return (K 3x3, dist 1x5, square_size_m, board_shape (rows, cols))."""
     with open(path) as f:
         cal = json.load(f)
     K = np.array(cal["camera_matrix"], dtype=np.float64)
     dist = np.array(cal["dist_coeff"], dtype=np.float64)
+
+    # Sanity-check: warn if principal point is exactly at the image centre,
+    # which often indicates the intrinsics were guessed rather than calibrated.
+    img_sz = cal.get("image_size_px")
+    if img_sz is not None:
+        w, h = img_sz
+        if K[0, 2] == w / 2.0 and K[1, 2] == h / 2.0:
+            import warnings
+
+            warnings.warn(
+                f"Camera principal point (cx={K[0, 2]}, cy={K[1, 2]}) is exactly "
+                f"at the image centre ({w / 2}, {h / 2}). This may indicate the "
+                f"intrinsics in {path} are approximate/guessed rather than "
+                f"properly calibrated. Re-run intrinsic calibration for best "
+                f"accuracy.",
+                stacklevel=2,
+            )
+
     sq_m = cal.get("square_size_mm", BOARD_SQUARE_SIZE_MM) / 1000.0
     rows = int(cal.get("board_rows", BOARD_ROWS))
     cols = int(cal.get("board_cols", BOARD_COLS))
@@ -478,13 +496,18 @@ def solve_pose_from_grid(
     R, _ = cv2.Rodrigues(rvec)
     t = tvec.ravel()
 
-    # Ensure board is in front of camera
+    # Ensure board is in front of camera.
+    # If solvePnP returns the board behind the camera (t_z < 0), the pose
+    # needs correction.  Negating R directly produces det(R)=-1 (improper
+    # reflection) which corrupts all downstream transforms.  Instead negate
+    # rvec/tvec and recompute R — this keeps R a proper rotation.
     if t[2] < 0:
-        # Flip — shouldn't normally happen with correct corner ordering
-        t = -t
-        R = -R
+        rvec = -rvec
+        tvec = -tvec
+        R, _ = cv2.Rodrigues(rvec)
+        t = tvec.ravel()
 
-    # Compute reprojection error over ALL points
+    # Compute reprojection error over ALL points (uses corrected rvec/tvec)
     proj, _ = cv2.projectPoints(obj_pts, rvec, tvec, K, dist)
     proj = proj.reshape(-1, 2)
     gt = img_pts.reshape(-1, 2)
