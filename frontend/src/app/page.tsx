@@ -732,12 +732,6 @@ function CameraFeed() {
             <line x1="-6" y1="-6" x2="6" y2="6" stroke="red" strokeWidth="2" opacity="0.9" />
             <line x1="6" y1="-6" x2="-6" y2="6" stroke="red" strokeWidth="2" opacity="0.9" />
           </svg>
-          <span
-            className="absolute left-1/2 text-[9px] font-mono text-red-400 whitespace-nowrap"
-            style={{ top: "16px", transform: "translateX(-50%)" }}
-          >
-            tip
-          </span>
         </div>
       )}
     </div>
