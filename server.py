@@ -1326,10 +1326,10 @@ async def move_to_keypoint(req: MoveToKeypointRequest):
 
 
 # ---------------------------------------------------------------------------
-# Sequence: Home → Pos1 → Home → Pos2
+# Sequence: Pos1 → Home → Pos2 → Home
 # ---------------------------------------------------------------------------
 
-_STEP_LABELS = ["Home", "Position 1", "Home", "Position 2", "Home"]
+_STEP_LABELS = ["Position 1", "Home", "Position 2", "Home"]
 _sequence_status: dict = {
     "running": False, "step": "", "step_num": 0, "total": len(_STEP_LABELS),
     "error": None, "done": False, "aborted": False, "labels": _STEP_LABELS,
@@ -1363,34 +1363,34 @@ def _run_sequence_blocking():
         joints2 = solve(SEQ_POS2)
 
         steps = [
-            ("Home", SEQ_HOME),
             ("Position 1", joints1),
             ("Home", SEQ_HOME),
             ("Position 2", joints2),
             ("Home", SEQ_HOME),
         ]
 
+        total = len(steps)
         for i, (label, joints) in enumerate(steps, 1):
             if _sequence_abort.is_set():
-                _sequence_status = {"running": False, "step": f"Aborted at step {i}", "step_num": i, "total": 5, "error": None, "done": False, "aborted": True, "labels": _STEP_LABELS}
+                _sequence_status = {"running": False, "step": f"Aborted at step {i}", "step_num": i, "total": total, "error": None, "done": False, "aborted": True, "labels": _STEP_LABELS}
                 return
-            _sequence_status = {"running": True, "step": f"Moving to {label}", "step_num": i, "total": 5, "error": None, "done": False, "aborted": False, "labels": _STEP_LABELS}
+            _sequence_status = {"running": True, "step": f"Moving to {label}", "step_num": i, "total": total, "error": None, "done": False, "aborted": False, "labels": _STEP_LABELS}
             ctrl.write_joint_array(joints, SEQ_SPEED)
             _sequence_status["step"] = f"Holding at {label}"
             for _ in range(int(SEQ_HOLD / 0.25)):
                 if _sequence_abort.is_set():
-                    _sequence_status = {"running": False, "step": f"Aborted at {label}", "step_num": i, "total": 5, "error": None, "done": False, "aborted": True, "labels": _STEP_LABELS}
+                    _sequence_status = {"running": False, "step": f"Aborted at {label}", "step_num": i, "total": total, "error": None, "done": False, "aborted": True, "labels": _STEP_LABELS}
                     return
                 time.sleep(0.25)
 
-        _sequence_status = {"running": False, "step": "Complete", "step_num": 5, "total": 5, "error": None, "done": True, "aborted": False, "labels": _STEP_LABELS}
+        _sequence_status = {"running": False, "step": "Complete", "step_num": total, "total": total, "error": None, "done": True, "aborted": False, "labels": _STEP_LABELS}
     except Exception as e:
-        _sequence_status = {"running": False, "step": "Error", "step_num": 0, "total": 5, "error": str(e), "done": False, "aborted": False, "labels": _STEP_LABELS}
+        _sequence_status = {"running": False, "step": "Error", "step_num": 0, "total": total, "error": str(e), "done": False, "aborted": False, "labels": _STEP_LABELS}
 
 
 @app.post("/api/sequence/run")
 async def run_sequence():
-    """Start the Home→Pos1→Home→Pos2→Home demo sequence."""
+    """Start the Pos1→Home→Pos2→Home demo sequence."""
     global _sequence_status
     if _sequence_status["running"]:
         raise HTTPException(409, "Sequence already running")
