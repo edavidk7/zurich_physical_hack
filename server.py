@@ -64,7 +64,9 @@ def _get_camera():
     if _camera is None:
         with _camera_lock:
             if _camera is None:
-                cfg = CameraConfig(index=CAMERA_INDEX, width=CAMERA_WIDTH, height=CAMERA_HEIGHT)
+                cfg = CameraConfig(
+                    index=CAMERA_INDEX, width=CAMERA_WIDTH, height=CAMERA_HEIGHT
+                )
                 _camera = CameraCapture(cfg)
                 _camera.open()
     return _camera
@@ -208,7 +210,10 @@ async def upload_document(file: UploadFile = File(...)):
     stem = Path(file.filename).stem
     existing = PARSED_DIR / f"{stem}_parsed.md"
     if existing.exists():
-        return {"status": "exists", "message": f"{file.filename} already in knowledge base"}
+        return {
+            "status": "exists",
+            "message": f"{file.filename} already in knowledge base",
+        }
 
     upload_path = UPLOAD_DIR / file.filename
     content = await file.read()
@@ -359,7 +364,9 @@ async def execute_task_stream(req: TaskRequest):
 
             content = md_file.read_text(encoding="utf-8")
             try:
-                result = await asyncio.to_thread(searcher.search, req.task, content, doc_name)
+                result = await asyncio.to_thread(
+                    searcher.search, req.task, content, doc_name
+                )
                 relevant = result.get("relevant", False)
                 yield send(
                     "search_result",
@@ -482,7 +489,9 @@ async def chat(req: ChatRequest):
     # Gather all document content
     docs = sorted(PARSED_DIR.glob("*_parsed.md"))
     if not docs:
-        return {"reply": "No documents in the knowledge base yet. Upload some PDFs first!"}
+        return {
+            "reply": "No documents in the knowledge base yet. Upload some PDFs first!"
+        }
 
     doc_context_parts = []
     for md_file in docs:
@@ -496,7 +505,9 @@ async def chat(req: ChatRequest):
     doc_context = "\n\n".join(doc_context_parts)
 
     # Build conversation prompt
-    conversation = f"KNOWLEDGE BASE DOCUMENTS:\n\n{doc_context}\n\n---\n\nCONVERSATION:\n"
+    conversation = (
+        f"KNOWLEDGE BASE DOCUMENTS:\n\n{doc_context}\n\n---\n\nCONVERSATION:\n"
+    )
     for msg in req.history:
         role_label = "User" if msg.role == "user" else "Assistant"
         conversation += f"\n{role_label}: {msg.content}\n"
@@ -512,7 +523,11 @@ async def chat(req: ChatRequest):
             temperature=0.3,
             max_output_tokens=4096,
         )
-        reply = response.text.strip() if response.text else "I couldn't generate a response."
+        reply = (
+            response.text.strip()
+            if response.text
+            else "I couldn't generate a response."
+        )
     except Exception as e:
         reply = f"Error: {e}"
 
@@ -594,7 +609,9 @@ _MOTOR_NAMES_ORDER = [
 
 
 class FKRequest(BaseModel):
-    joints_deg: list[float]  # 6 values: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
+    joints_deg: list[
+        float
+    ]  # 6 values: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
 
 
 class IKRequest(BaseModel):
@@ -630,11 +647,20 @@ async def forward_kinematics(req: FKRequest):
     # Check joint limits
     from src.ik_solver import _LIMITS_DEG
 
-    violations = [name for name, deg in q_deg.items() if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]]
-    roll_d, pitch_d, yaw_d = float(np.rad2deg(roll)), float(np.rad2deg(pitch)), float(np.rad2deg(yaw))
+    violations = [
+        name
+        for name, deg in q_deg.items()
+        if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]
+    ]
+    roll_d, pitch_d, yaw_d = (
+        float(np.rad2deg(roll)),
+        float(np.rad2deg(pitch)),
+        float(np.rad2deg(yaw)),
+    )
     print(
         f"[FK] EE pos = ({pos[0] * 1000:.1f}, {pos[1] * 1000:.1f}, {pos[2] * 1000:.1f}) mm  "
-        f"RPY = ({roll_d:.1f}°, {pitch_d:.1f}°, {yaw_d:.1f}°)" + (f"  violations={violations}" if violations else "")
+        f"RPY = ({roll_d:.1f}°, {pitch_d:.1f}°, {yaw_d:.1f}°)"
+        + (f"  violations={violations}" if violations else "")
     )
     return {
         "ee_position": {
@@ -662,7 +688,10 @@ async def inverse_kinematics(req: IKRequest):
         live = mc.read_positions().get("positions_deg", {})
         q_init = {n: float(live.get(n, 0.0)) for n in _MOTOR_NAMES_ORDER}
     elif req.init_joints_deg and len(req.init_joints_deg) == 6:
-        q_init = {name: float(deg) for name, deg in zip(_MOTOR_NAMES_ORDER, req.init_joints_deg)}
+        q_init = {
+            name: float(deg)
+            for name, deg in zip(_MOTOR_NAMES_ORDER, req.init_joints_deg)
+        }
     else:
         q_init = {n: 0.0 for n in _MOTOR_NAMES_ORDER}
     q_init["gripper"] = req.gripper_deg
@@ -704,7 +733,11 @@ async def inverse_kinematics(req: IKRequest):
 
     from src.ik_solver import _LIMITS_DEG
 
-    violations = [name for name, deg in q_result.items() if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]]
+    violations = [
+        name
+        for name, deg in q_result.items()
+        if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]
+    ]
     joints_list = [q_result[n] for n in _MOTOR_NAMES_ORDER]
     roll_d = float(np.rad2deg(roll_r))
     pitch_d = float(np.rad2deg(pitch_r))
@@ -714,7 +747,9 @@ async def inverse_kinematics(req: IKRequest):
         f"achieved=({pos[0] * 1000:.1f}, {pos[1] * 1000:.1f}, {pos[2] * 1000:.1f}) mm  "
         f"error={error_mm:.2f} mm  success={error_mm < 10.0}"
     )
-    print("[IK] joints = " + "  ".join(f"{n[:4]}={v:.1f}°" for n, v in q_result.items()))
+    print(
+        "[IK] joints = " + "  ".join(f"{n[:4]}={v:.1f}°" for n, v in q_result.items())
+    )
     if violations:
         print(f"[IK] LIMIT VIOLATIONS: {violations}")
     return {
@@ -777,7 +812,9 @@ async def motor_connect(req: MotorConnectRequest):
     if not port:
         port = find_robot_port()
         if not port:
-            raise HTTPException(400, "No robot serial port detected. Specify port manually.")
+            raise HTTPException(
+                400, "No robot serial port detected. Specify port manually."
+            )
     ctrl = get_motor_controller()
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, ctrl.connect, port)
@@ -837,7 +874,9 @@ async def motor_write_positions(req: MotorWriteRequest):
     if not ctrl.is_connected:
         raise HTTPException(400, "Robot not connected. Call /api/motor/connect first.")
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, ctrl.write_joint_array, req.joints_deg, req.speed)
+    result = await loop.run_in_executor(
+        None, ctrl.write_joint_array, req.joints_deg, req.speed
+    )
     if "error" in result:
         raise HTTPException(500, result["error"])
     return result
@@ -964,7 +1003,12 @@ async def tooltip_projection():
     from src.constants import CAMERA_WIDTH, CAMERA_HEIGHT, P_TIP_CAM_M
 
     if not _CALIB_PATH.exists():
-        return {"visible": False, "u_norm": 0.5, "v_norm": 0.5, "error": "calibration.json not found"}
+        return {
+            "visible": False,
+            "u_norm": 0.5,
+            "v_norm": 0.5,
+            "error": "calibration.json not found",
+        }
 
     K, _, _, _ = load_calibration()
 
@@ -1000,27 +1044,37 @@ class ReferenceImage(BaseModel):
 class KeypointRequest(BaseModel):
     prompt: str
     reference_images: list[ReferenceImage] = []
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3-flash-preview"
     thinking_budget: int = 0
+    thinking_level: Optional[str] = None  # "minimal", "low", "medium", "high"
+    temperature: float = 1.0
 
 
 class StepKeypointRequest(BaseModel):
     step: dict
     reference_images: list[ReferenceImage] = []
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3-flash-preview"
     thinking_budget: int = 0
+    thinking_level: Optional[str] = None  # "minimal", "low", "medium", "high"
+    temperature: float = 1.0
 
 
 def _prompt_from_step(step: dict) -> str:
-    """Auto-generate a keypoint localisation prompt from a task plan step."""
+    """Auto-generate a keypoint localisation prompt from a task plan step.
+
+    The SO-101 robot only manipulates the positive (+) multimeter probe.
+    The negative probe is clipped to a fixed point and never moved, so we
+    only need to localise the positive probe's target and the current tip.
+    """
     params = step.get("parameters") or {}
     probe_pos = params.get("probe_positive", "")
-    probe_neg = params.get("probe_negative", "")
-    targets = [p for p in [probe_pos, probe_neg] if p and isinstance(p, str)]
-    if targets:
-        return f"Locate {' and '.join(targets)} on the board, and the current tip position of the multimeter probe"
+    if probe_pos and isinstance(probe_pos, str):
+        return (
+            f"Locate {probe_pos} on the board, "
+            "and the current tip position of the robot's positive multimeter probe"
+        )
     target = step.get("target") or step.get("description") or "the target component"
-    return f"Locate {target} on the board and the current tip position of the multimeter probe"
+    return f"Locate {target} on the board and the current tip position of the robot's positive multimeter probe"
 
 
 @app.post("/api/execute/step-keypoints")
@@ -1041,7 +1095,9 @@ async def step_keypoints(req: StepKeypointRequest):
         if not img_path.exists():
             img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
         if not img_path.exists():
-            raise HTTPException(404, f"Reference image not found: {ri.doc_name}/{ri.image_name}")
+            raise HTTPException(
+                404, f"Reference image not found: {ri.doc_name}/{ri.image_name}"
+            )
         ref_pil.append(load_and_prep_image(img_path))
 
     try:
@@ -1060,6 +1116,8 @@ async def step_keypoints(req: StepKeypointRequest):
             prompt,
             req.model,
             req.thinking_budget,
+            req.thinking_level,
+            req.temperature,
         )
     except Exception as e:
         raise HTTPException(500, f"VLM error: {e}")
@@ -1091,7 +1149,9 @@ async def locate_keypoints(req: KeypointRequest):
         if not img_path.exists():
             img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
         if not img_path.exists():
-            raise HTTPException(404, f"Reference image not found: {ri.doc_name}/{ri.image_name}")
+            raise HTTPException(
+                404, f"Reference image not found: {ri.doc_name}/{ri.image_name}"
+            )
         ref_pil.append(load_and_prep_image(img_path))
 
     try:
@@ -1110,6 +1170,8 @@ async def locate_keypoints(req: KeypointRequest):
             req.prompt,
             req.model,
             req.thinking_budget,
+            req.thinking_level,
+            req.temperature,
         )
     except Exception as e:
         raise HTTPException(500, f"VLM error: {e}")

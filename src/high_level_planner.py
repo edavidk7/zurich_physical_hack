@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from PIL import Image, ImageDraw, ImageOps
@@ -46,7 +47,9 @@ def load_and_prep_image(img_path: Path, target_width: int | None = None) -> Imag
     img = ImageOps.exif_transpose(img)
     if target_width is not None:
         aspect_ratio = img.size[1] / img.size[0]
-        img = img.resize((target_width, int(target_width * aspect_ratio)), Image.Resampling.LANCZOS)
+        img = img.resize(
+            (target_width, int(target_width * aspect_ratio)), Image.Resampling.LANCZOS
+        )
     return img
 
 
@@ -54,18 +57,29 @@ def load_and_prep_image(img_path: Path, target_width: int | None = None) -> Imag
 # Core API — importable by server (no matplotlib)
 # ---------------------------------------------------------------------------
 
+
 def extract_keypoints(
     reference_images: list[Image.Image],
     camera_image: Image.Image,
     prompt: str,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3-flash-preview",
     thinking_budget: int = 0,
+    thinking_level: str | None = None,
+    temperature: float = 1.0,
 ) -> list[dict]:
     """
     Call the VLM to locate keypoints in the camera image using reference images.
 
     Returns a list of dicts: [{"point": [y, x], "label": str}]
     Coordinates are normalised to 0-1000.
+
+    Parameters
+    ----------
+    thinking_level : str | None
+        One of "minimal", "low", "medium", "high", or None.
+        When set, overrides ``thinking_budget``.
+    temperature : float
+        Sampling temperature passed to the model.
     """
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
@@ -81,20 +95,23 @@ def extract_keypoints(
     contents.append(
         f"Locate the following in Image {cam_idx} (the live camera feed): {prompt}.\n"
         "The preceding images are reference schematics for context only.\n"
-        'Return the answer as JSON: [{"point": [y, x], "label": "<name>"}].\n'
-        "Points are in [y, x] format normalised to 0-1000.\n"
+        'Return the answer as JSON: [{"point": [y, x], "label": "<identifying name>"}].\n'
+        "Points are in [y, x] format normalized to 0-1000.\n"
         f"Only return points visible in Image {cam_idx}. If not found, return []."
     )
+
+    thinking_args: dict = {"include_thoughts": True}
+    if thinking_level is not None:
+        thinking_args["thinking_level"] = thinking_level
+    else:
+        thinking_args["thinking_budget"] = thinking_budget
 
     response = client.models.generate_content(
         model=model,
         contents=contents,
         config=types.GenerateContentConfig(
-            temperature=1.0,
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=True,
-                thinking_budget=thinking_budget,
-            ),
+            temperature=temperature,
+            thinking_config=types.ThinkingConfig(**thinking_args),
         ),
     )
 
@@ -127,7 +144,9 @@ def annotate_image_pil(image: Image.Image, keypoints: list[dict]) -> Image.Image
         # label background + text
         tx, ty = px_x + r + 6, px_y - 10
         bbox = draw.textbbox((tx, ty), label)
-        draw.rectangle([bbox[0] - 3, bbox[1] - 2, bbox[2] + 3, bbox[3] + 2], fill="black")
+        draw.rectangle(
+            [bbox[0] - 3, bbox[1] - 2, bbox[2] + 3, bbox[3] + 2], fill="black"
+        )
         draw.text((tx, ty), label, fill=color)
 
         det["pixel"] = [px_x, px_y]
@@ -146,9 +165,11 @@ def annotated_image_to_base64(image: Image.Image) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     import matplotlib
-    matplotlib.use("Agg")
+
+    matplotlib.use("QtAgg")
     import matplotlib.pyplot as plt
 
     parser = argparse.ArgumentParser(
@@ -160,11 +181,16 @@ def main():
         nargs="+",
         help="paths to images. the final image is the live camera feed; preceding images are reference material.",
     )
-    parser.add_argument("-p", "--prompt", required=True, help="the component or feature to localize")
+    parser.add_argument(
+        "-p", "--prompt", required=True, help="the component or feature to localize"
+    )
     parser.add_argument("-tb", "--thinking-budget", type=int, default=0)
     parser.add_argument(
-        "-tl", "--thinking-level",
-        type=str, choices=["minimal", "low", "medium", "high", None], default=None,
+        "-tl",
+        "--thinking-level",
+        type=str,
+        choices=["minimal", "low", "medium", "high", None],
+        default=None,
     )
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--model", default="gemini-3-flash-preview")
@@ -176,7 +202,9 @@ def main():
             print(f"!!! file not found: {img_path}")
             return
 
-    ref_imgs = [load_and_prep_image(Path(p), args.target_width) for p in args.images[:-1]]
+    ref_imgs = [
+        load_and_prep_image(Path(p), args.target_width) for p in args.images[:-1]
+    ]
     camera_img = load_and_prep_image(Path(args.images[-1]), args.target_width)
 
     print(f"querying {args.model} (thinking_budget={args.thinking_budget})...")
@@ -230,7 +258,9 @@ def main():
 
     for i, det in enumerate(data):
         px = det.get("pixel", [0, 0])
-        print(f"  [{i}] '{det.get('label')}' -> pixel {px}  [norm: y={det['point'][0]}, x={det['point'][1]}]")
+        print(
+            f"  [{i}] '{det.get('label')}' -> pixel {px}  [norm: y={det['point'][0]}, x={det['point'][1]}]"
+        )
 
     # Show with matplotlib
     fig, ax = plt.subplots(figsize=(10, 8))
