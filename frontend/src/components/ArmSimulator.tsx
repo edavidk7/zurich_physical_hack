@@ -134,14 +134,191 @@ function SceneSetup() {
 // Exported ArmSimulator component
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Target position marker (glowing sphere at the IK target in robot frame)
+// ---------------------------------------------------------------------------
+
+function TargetMarker({ position }: { position: [number, number, number] }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  // Pulse animation
+  useEffect(() => {
+    if (!meshRef.current) return;
+    let frame: number;
+    const animate = () => {
+      if (meshRef.current) {
+        const t = Date.now() * 0.003;
+        meshRef.current.scale.setScalar(1 + 0.15 * Math.sin(t));
+      }
+      frame = requestAnimationFrame(animate);
+    };
+    frame = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  // Robot frame: the URDF is rotated -90° about X in <group rotation={[-PI/2,0,0]} />.
+  // Positions from the IK solver are in the robot base frame where:
+  //   robot +X = forward, +Y = left, +Z = up
+  // In the scene (after URDF rotation), the mapping is:
+  //   scene X = robot X, scene Y = robot Z, scene Z = -robot Y
+  const [rx, ry, rz] = position;
+  const scenePos: [number, number, number] = [rx, rz, -ry];
+
+  return (
+    <group position={scenePos}>
+      {/* Outer glow */}
+      <mesh ref={meshRef}>
+        <sphereGeometry args={[0.012, 24, 24]} />
+        <meshStandardMaterial
+          color="#ff4444"
+          emissive="#ff2222"
+          emissiveIntensity={1.5}
+          transparent
+          opacity={0.35}
+        />
+      </mesh>
+      {/* Inner solid sphere */}
+      <mesh>
+        <sphereGeometry args={[0.005, 16, 16]} />
+        <meshStandardMaterial color="#ff4444" emissive="#ff0000" emissiveIntensity={2} />
+      </mesh>
+      {/* Vertical line to ground plane for depth reference */}
+      <line>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            args={[new Float32Array([0, 0, 0, 0, -scenePos[1], 0]), 3]}
+          />
+        </bufferGeometry>
+        <lineBasicMaterial color="#ff4444" transparent opacity={0.3} />
+      </line>
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Current tip position marker (smaller teal sphere)
+// ---------------------------------------------------------------------------
+
+function TipMarker({ position }: { position: [number, number, number] }) {
+  const [rx, ry, rz] = position;
+  const scenePos: [number, number, number] = [rx, rz, -ry];
+
+  return (
+    <mesh position={scenePos}>
+      <sphereGeometry args={[0.004, 16, 16]} />
+      <meshStandardMaterial color="#37e0d8" emissive="#37e0d8" emissiveIntensity={1.5} />
+    </mesh>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Line connecting current tip to target
+// ---------------------------------------------------------------------------
+
+function TargetLine({
+  from,
+  to,
+}: {
+  from: [number, number, number];
+  to: [number, number, number];
+}) {
+  const fromScene: [number, number, number] = [from[0], from[2], -from[1]];
+  const toScene: [number, number, number] = [to[0], to[2], -to[1]];
+
+  const positions = new Float32Array([
+    fromScene[0], fromScene[1], fromScene[2],
+    toScene[0], toScene[1], toScene[2],
+  ]);
+
+  return (
+    <line>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+      </bufferGeometry>
+      <lineDashedMaterial color="#ff8844" dashSize={0.008} gapSize={0.004} transparent opacity={0.6} />
+    </line>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ghost robot model showing target pose (semi-transparent)
+// ---------------------------------------------------------------------------
+
+function GhostRobotModel({ joints }: { joints: number[] }) {
+  const groupRef = useRef<THREE.Group>(null);
+  const [robot, setRobot] = useState<URDFRobot | null>(null);
+
+  useEffect(() => {
+    const loader = new URDFLoader();
+    loader.packages = "";
+    loader.load("/robot/so100.urdf", (result) => {
+      result.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          const mesh = child as THREE.Mesh;
+          mesh.material = new THREE.MeshStandardMaterial({
+            color: "#ff6644",
+            metalness: 0.1,
+            roughness: 0.8,
+            transparent: true,
+            opacity: 0.25,
+            depthWrite: false,
+          });
+        }
+      });
+      setRobot(result);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!robot) return;
+    JOINT_NAMES.forEach((name, i) => {
+      const joint = robot.joints[name];
+      if (joint) {
+        const angleRad = motorToUrdf(i, joints[i] ?? 0);
+        joint.setJointValue(angleRad);
+      }
+    });
+  }, [robot, joints]);
+
+  useEffect(() => {
+    if (!robot || !groupRef.current) return;
+    while (groupRef.current.children.length > 0) {
+      groupRef.current.remove(groupRef.current.children[0]);
+    }
+    groupRef.current.add(robot);
+  }, [robot]);
+
+  return <group ref={groupRef} rotation={[-Math.PI / 2, 0, 0]} />;
+}
+
+// ---------------------------------------------------------------------------
+// Exported ArmSimulator component
+// ---------------------------------------------------------------------------
+
 interface ArmSimulatorProps {
   /** 6 joint angles in degrees: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper] */
   joints: number[];
   /** Optional CSS class for the container */
   className?: string;
+  /** Target position in robot base frame [x, y, z] in metres — shown as a red marker */
+  targetPosition?: [number, number, number];
+  /** Current tooltip position in robot base frame [x, y, z] in metres — shown as a teal marker */
+  currentTipPosition?: [number, number, number];
+  /** Target joint angles (same format as joints) — shown as a transparent ghost robot */
+  targetJoints?: number[];
+  /** Whether to show the connecting line from tip to target */
+  showTargetLine?: boolean;
 }
 
-export default function ArmSimulator({ joints, className }: ArmSimulatorProps) {
+export default function ArmSimulator({
+  joints,
+  className,
+  targetPosition,
+  currentTipPosition,
+  targetJoints,
+  showTargetLine = true,
+}: ArmSimulatorProps) {
   return (
     <div className={className ?? "w-full h-full min-h-[300px]"}>
       <Canvas
@@ -173,10 +350,28 @@ export default function ArmSimulator({ joints, className }: ArmSimulatorProps) {
           infiniteGrid
         />
 
-        {/* Robot */}
+        {/* Robot (current pose) */}
         <Suspense fallback={null}>
           <RobotModel joints={joints} />
         </Suspense>
+
+        {/* Ghost robot (target pose) */}
+        {targetJoints && (
+          <Suspense fallback={null}>
+            <GhostRobotModel joints={targetJoints} />
+          </Suspense>
+        )}
+
+        {/* Target position marker */}
+        {targetPosition && <TargetMarker position={targetPosition} />}
+
+        {/* Current tip marker */}
+        {currentTipPosition && <TipMarker position={currentTipPosition} />}
+
+        {/* Line from current tip to target */}
+        {showTargetLine && currentTipPosition && targetPosition && (
+          <TargetLine from={currentTipPosition} to={targetPosition} />
+        )}
 
         {/* Camera controls */}
         <OrbitControls

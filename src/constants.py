@@ -29,7 +29,11 @@ CAM_TILT_EE_DEG: float = -35.0
 TOOL_INTERSECT_DIST = 0.0115
 INTERSECT_TO_TIP = 0.0020
 INTERSECT_ANGLE = np.deg2rad(35)
-P_TIP_CAM_M: list[float] = [0.001, -0.001, TOOL_INTERSECT_DIST + np.cos(INTERSECT_ANGLE) * INTERSECT_TO_TIP]
+P_TIP_CAM_M: list[float] = [
+    0.001,
+    -0.001,
+    TOOL_INTERSECT_DIST + np.cos(INTERSECT_ANGLE) * INTERSECT_TO_TIP,
+]
 
 # ── Workspace checkerboard ────────────────────────────────────────────────────
 
@@ -47,6 +51,20 @@ BOARD_COLS: int = 20
 # Height of the target / workspace plane above the checkerboard surface (metres).
 # "3 mm" means the PCB or component being probed sits 3 mm above the board.
 WORKSPACE_PLANE_OFFSET_M: float = 0.003
+
+# ── ArUco markers ─────────────────────────────────────────────────────────
+
+# Physical side length of one ArUco marker (millimetres).
+# Must match the printed sheet (generate_aruco_sheet.py default is 18 mm).
+ARUCO_MARKER_SIZE_MM: float = 18.0
+
+# Sheet grid layout — must match generate_aruco_sheet.py.
+# Markers are numbered row-major: ID = row * ARUCO_SHEET_COLS + col.
+ARUCO_SHEET_COLS: int = 8  # markers per row
+ARUCO_SHEET_ROWS: int = 12  # rows on the sheet
+
+# Gap between adjacent markers on the sheet (millimetres).
+ARUCO_SHEET_GAP_MM: float = 4.5  # 0.45 cm
 
 # ── Camera capture ────────────────────────────────────────────────────────────
 

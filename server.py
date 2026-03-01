@@ -1214,7 +1214,9 @@ async def move_to_keypoint(req: MoveToKeypointRequest):
     from PIL import Image
     from src.pose_estimation import estimate_camera_pose, compute_movement_to_keypoint
 
-    print(f"[move-to-kp] request: norm_y={req.norm_y:.1f}, norm_x={req.norm_x:.1f}, dry_run={req.dry_run}")
+    print(
+        f"[move-to-kp] request: norm_y={req.norm_y:.1f}, norm_x={req.norm_x:.1f}, dry_run={req.dry_run}"
+    )
 
     # 1. Capture frame
     try:
@@ -1254,29 +1256,40 @@ async def move_to_keypoint(req: MoveToKeypointRequest):
     # 3. Compute lateral movement delta (camera frame, mm)
     delta_cam = await asyncio.to_thread(
         compute_movement_to_keypoint,
-        req.norm_y, req.norm_x,
-        rvec, tvec, K, D,
-        img_w, img_h,
+        req.norm_y,
+        req.norm_x,
+        rvec,
+        tvec,
+        K,
+        D,
+        img_w,
+        img_h,
     )
 
     # Camera→robot frame mapping (straight-down mount)
     dx_cam_mm, dy_cam_mm = float(delta_cam[0]), float(delta_cam[1])
-    delta_robot = np.array([
-        dy_cam_mm / 1000.0,
-        -dx_cam_mm / 1000.0,
-        0.0,
-    ])
+    delta_robot = np.array(
+        [
+            dy_cam_mm / 1000.0,
+            -dx_cam_mm / 1000.0,
+            0.0,
+        ]
+    )
     dist_m = float(np.linalg.norm(delta_robot[:2]))
 
     print(
         f"[move-to-kp] delta_cam=({dx_cam_mm:.1f}, {dy_cam_mm:.1f}) mm  "
-        f"delta_robot=({delta_robot[0]*100:.2f}, {delta_robot[1]*100:.2f}, 0) cm  "
-        f"dist={dist_m*100:.2f} cm"
+        f"delta_robot=({delta_robot[0] * 100:.2f}, {delta_robot[1] * 100:.2f}, 0) cm  "
+        f"dist={dist_m * 100:.2f} cm"
     )
 
     result = {
         "delta_cam_mm": {"dx": dx_cam_mm, "dy": dy_cam_mm},
-        "delta_robot_m": {"x": float(delta_robot[0]), "y": float(delta_robot[1]), "z": 0.0},
+        "delta_robot_m": {
+            "x": float(delta_robot[0]),
+            "y": float(delta_robot[1]),
+            "z": 0.0,
+        },
         "distance_m": dist_m,
         "cam_height_mm": cam_height_mm,
         "dry_run": req.dry_run,
@@ -1289,14 +1302,22 @@ async def move_to_keypoint(req: MoveToKeypointRequest):
         return result
 
     if req.dry_run:
-        print(f"[move-to-kp] dry run — would move {dist_m*100:.1f} cm")
+        print(f"[move-to-kp] dry run — would move {dist_m * 100:.1f} cm")
         result["message"] = f"Dry run: would move {dist_m * 100:.1f} cm."
         return result
 
     # 4. Execute cartesian move via lerobot
     import sys
+
     sys.path.insert(0, str(Path(__file__).parent / "scripts"))
-    from move_arm_cartesian import cartesian_move, obs_to_q, ALL_JOINTS, PORT, ROBOT_ID, N_STEPS
+    from move_arm_cartesian import (
+        cartesian_move,
+        obs_to_q,
+        ALL_JOINTS,
+        PORT,
+        ROBOT_ID,
+        N_STEPS,
+    )
     from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
     from lerobot.robots.so_follower.so_follower import SOFollower
 
@@ -1313,7 +1334,9 @@ async def move_to_keypoint(req: MoveToKeypointRequest):
         n_steps = max(N_STEPS, int(dist_m / 0.0025))
         print(f"[move-to-kp] executing cartesian_move with {n_steps} steps…")
         q = await asyncio.to_thread(cartesian_move, robot, q, delta_robot, n_steps)
-        print(f"[move-to-kp] move complete, final joints (deg): {np.round(q, 1).tolist()}")
+        print(
+            f"[move-to-kp] move complete, final joints (deg): {np.round(q, 1).tolist()}"
+        )
 
         robot.disconnect()
         print("[move-to-kp] robot disconnected")
@@ -1323,8 +1346,364 @@ async def move_to_keypoint(req: MoveToKeypointRequest):
 
     result["moved"] = True
     result["message"] = f"Moved {dist_m * 100:.1f} cm toward keypoint."
-    print(f"[move-to-kp] done — moved {dist_m*100:.1f} cm")
+    print(f"[move-to-kp] done — moved {dist_m * 100:.1f} cm")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Routes — Automated pipeline: plan step → keypoint → localise → IK → move
+# ---------------------------------------------------------------------------
+
+# Pending move state — stores the trajectory computed by /run-step so that
+# /confirm-move can replay it without recomputation.
+_pending_move: dict | None = None
+_pending_move_lock = threading.Lock()
+
+
+class RunStepRequest(BaseModel):
+    step: dict  # a single task plan step (must have "parameters.probe_positive")
+    reference_images: list[ReferenceImage] = []
+    model: str = "gemini-3-flash-preview"
+    thinking_budget: int = 0
+    thinking_level: Optional[str] = None
+    temperature: float = 1.0
+    plane_offset_m: float = 0.003  # target plane height above ArUco board
+    motion_steps: int = 40  # waypoints for trajectory interpolation
+    speed: int = 15  # motor speed (1-100)
+
+
+class ConfirmMoveRequest(BaseModel):
+    speed: Optional[int] = None  # override speed if desired
+
+
+@app.post("/api/execute/run-step")
+async def run_step(req: RunStepRequest):
+    """
+    Fully automated pipeline for a single plan step.
+
+    1. Auto-generate VLM prompt from the step
+    2. Load reference images from the parsed document store
+    3. Capture a live camera frame
+    4. Run Gemini VLM keypoint extraction
+    5. Convert VLM normalised coords to pixel coords
+    6. Run ArUco-based 3D localisation → camera-frame 3D point
+    7. Read current motor positions, compute FK → camera-to-robot transform
+    8. Transform 3D point to robot base frame
+    9. Solve IK for target position
+    10. Plan motion trajectory (cosine-interpolated)
+    11. Store trajectory as pending — do NOT execute yet
+
+    Returns the full computation result for user review + confirmation.
+    """
+    import numpy as np
+    from PIL import Image
+    from src.localize_from_aruco import localize_keypoint, load_calibration
+    from src.robot_cam_calibration import compute_T_robot_cam, cam_to_robot
+
+    global _pending_move
+
+    # ── 1. Auto-generate VLM prompt ──────────────────────────────────────
+    prompt = _prompt_from_step(req.step)
+    print(f"[run-step] prompt: {prompt}")
+
+    # ── 2. Load reference images ─────────────────────────────────────────
+    ref_pil: list[Image.Image] = []
+    for ri in req.reference_images:
+        clean = ri.doc_name.replace("_parsed", "")
+        img_path = PARSED_DIR / f"{clean}_images" / ri.image_name
+        if not img_path.exists():
+            img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
+        if not img_path.exists():
+            raise HTTPException(
+                404, f"Reference image not found: {ri.doc_name}/{ri.image_name}"
+            )
+        ref_pil.append(load_and_prep_image(img_path))
+
+    # ── 3. Capture live camera frame ─────────────────────────────────────
+    try:
+        cam = _get_camera()
+        loop = asyncio.get_event_loop()
+        jpeg_bytes = await loop.run_in_executor(None, cam.capture_jpeg)
+        camera_pil = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(500, f"Camera error: {e}")
+
+    # ── 4. VLM keypoint extraction ───────────────────────────────────────
+    try:
+        keypoints = await asyncio.to_thread(
+            extract_keypoints,
+            ref_pil,
+            camera_pil,
+            prompt,
+            req.model,
+            req.thinking_budget,
+            req.thinking_level,
+            req.temperature,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"VLM keypoint extraction error: {e}")
+
+    print(
+        f"[run-step] VLM returned {len(keypoints)} keypoints: "
+        f"{[kp.get('label', '?') for kp in keypoints]}"
+    )
+
+    annotated = annotate_image_pil(camera_pil, keypoints)
+    img_b64 = annotated_image_to_base64(annotated)
+
+    # ── 5. Pick the target keypoint and convert to pixel coords ──────────
+    # The VLM returns keypoints as {"point": [y, x], "label": "..."} in
+    # normalised 0-1000 coords.  The first keypoint whose label does NOT
+    # contain "probe" / "tip" / "robot" is the target component; the rest
+    # is the current probe position.  If we can't distinguish, use the
+    # first keypoint as the target.
+    target_kp = None
+    probe_kp = None
+    for kp in keypoints:
+        label_lower = (kp.get("label") or "").lower()
+        is_probe = any(w in label_lower for w in ("probe", "tip", "robot", "current"))
+        if is_probe and probe_kp is None:
+            probe_kp = kp
+        elif not is_probe and target_kp is None:
+            target_kp = kp
+    if target_kp is None:
+        target_kp = keypoints[0] if keypoints else None
+    if target_kp is None:
+        raise HTTPException(422, "VLM returned no keypoints — cannot localise target")
+
+    # Convert normalised 0-1000 (y, x) → pixel (u, v)
+    cam_w, cam_h = camera_pil.size  # (width, height)
+    norm_y, norm_x = target_kp["point"]
+    pixel_u = norm_x / 1000.0 * cam_w  # u = column
+    pixel_v = norm_y / 1000.0 * cam_h  # v = row
+    print(
+        f"[run-step] target '{target_kp.get('label')}' → pixel ({pixel_u:.1f}, {pixel_v:.1f})"
+    )
+
+    # ── 6. ArUco-based 3D localisation ───────────────────────────────────
+    # Convert PIL RGB → OpenCV BGR numpy array for ArUco detection
+    camera_bgr = np.array(camera_pil)[:, :, ::-1].copy()
+
+    try:
+        loc_result = await asyncio.to_thread(
+            localize_keypoint,
+            camera_bgr,
+            (pixel_u, pixel_v),
+            req.plane_offset_m,
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            422,
+            f"ArUco localisation failed (no markers detected?): {e}",
+        )
+    except Exception as e:
+        raise HTTPException(500, f"ArUco localisation error: {e}")
+
+    pos_cam_m = np.array(loc_result["pos_cam_m"])
+    pos_board_m = loc_result["pos_board_m"]
+    depth_m = loc_result["depth_m"]
+    reproj_err = loc_result["pose"].reprojection_err_px
+    n_markers = len(loc_result["pose"].marker_ids)
+    print(
+        f"[run-step] 3D cam-frame: {pos_cam_m}  (depth={depth_m:.4f} m, "
+        f"markers={n_markers}, reproj={reproj_err:.2f} px)"
+    )
+
+    # ── 7. Read current joint angles, compute cam→robot transform ────────
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected. Call /api/motor/connect first.")
+
+    motor_result = await asyncio.get_event_loop().run_in_executor(
+        None, ctrl.read_positions
+    )
+    if "error" in motor_result:
+        raise HTTPException(500, f"Motor read error: {motor_result['error']}")
+
+    q_current_deg: dict[str, float] = motor_result["positions_deg"]
+    print(
+        f"[run-step] current joints: { {k: round(v, 1) for k, v in q_current_deg.items()} }"
+    )
+
+    solver = get_ik_solver()
+    T_robot_cam = compute_T_robot_cam(q_current_deg, solver)
+    target_robot = cam_to_robot(pos_cam_m, T_robot_cam)
+    print(f"[run-step] target in robot frame: {target_robot}")
+
+    # Also compute current tip position for logging/display
+    current_tip = solver.current_tip_pos(q_current_deg)
+    delta = target_robot - current_tip
+    dist_m = float(np.linalg.norm(delta))
+    print(
+        f"[run-step] current tip: {current_tip}, delta: {delta}, dist: {dist_m:.4f} m"
+    )
+
+    # ── 8. Solve IK ──────────────────────────────────────────────────────
+    try:
+        q_target_deg = solver.ik(q_current_deg, target_robot)
+    except Exception as e:
+        raise HTTPException(500, f"IK solver error: {e}")
+
+    # Verify IK solution
+    achieved_tip = solver.current_tip_pos(q_target_deg)
+    ik_error_m = float(np.linalg.norm(achieved_tip - target_robot))
+    print(f"[run-step] IK solution tip: {achieved_tip}, error: {ik_error_m:.5f} m")
+
+    # ── 9. Plan motion trajectory ────────────────────────────────────────
+    trajectory = solver.plan_motion(
+        q_current_deg, q_target_deg, n_steps=req.motion_steps
+    )
+
+    # ── 10. Store as pending move ────────────────────────────────────────
+    pending = {
+        "step": req.step,
+        "prompt": prompt,
+        "target_keypoint": target_kp,
+        "probe_keypoint": probe_kp,
+        "pixel_uv": [pixel_u, pixel_v],
+        "pos_cam_m": pos_cam_m.tolist(),
+        "pos_board_m": [float(x) for x in pos_board_m],
+        "depth_m": float(depth_m),
+        "target_robot_m": target_robot.tolist(),
+        "current_tip_m": current_tip.tolist(),
+        "delta_m": delta.tolist(),
+        "distance_m": dist_m,
+        "q_current_deg": {k: round(v, 2) for k, v in q_current_deg.items()},
+        "q_target_deg": {k: round(v, 2) for k, v in q_target_deg.items()},
+        "ik_error_m": ik_error_m,
+        "trajectory": trajectory,
+        "motion_steps": req.motion_steps,
+        "speed": req.speed,
+        "n_markers": n_markers,
+        "reprojection_err_px": reproj_err,
+    }
+
+    with _pending_move_lock:
+        _pending_move = pending
+
+    return {
+        "status": "pending_confirmation",
+        "annotated_image": img_b64,
+        "keypoints": keypoints,
+        "prompt": prompt,
+        "target_keypoint": target_kp,
+        "probe_keypoint": probe_kp,
+        "pixel_uv": [round(pixel_u, 1), round(pixel_v, 1)],
+        "pos_cam_m": pos_cam_m.tolist(),
+        "pos_board_m": [float(x) for x in pos_board_m],
+        "depth_m": round(depth_m, 5),
+        "target_robot_m": [round(x, 5) for x in target_robot.tolist()],
+        "current_tip_m": [round(x, 5) for x in current_tip.tolist()],
+        "delta_m": [round(x, 5) for x in delta.tolist()],
+        "distance_m": round(dist_m, 5),
+        "q_current_deg": {k: round(v, 2) for k, v in q_current_deg.items()},
+        "q_target_deg": {k: round(v, 2) for k, v in q_target_deg.items()},
+        "ik_error_m": round(ik_error_m, 6),
+        "motion_steps": req.motion_steps,
+        "n_markers": n_markers,
+        "reprojection_err_px": round(reproj_err, 2),
+        "camera_size": [cam_w, cam_h],
+    }
+
+
+@app.post("/api/execute/confirm-move")
+async def confirm_move(req: ConfirmMoveRequest = ConfirmMoveRequest()):
+    """
+    Execute the pending move that was computed by /api/execute/run-step.
+
+    Replays the pre-computed trajectory through the motor controller,
+    one waypoint at a time with a short delay for smooth motion.
+    """
+    global _pending_move
+
+    with _pending_move_lock:
+        pending = _pending_move
+        if pending is None:
+            raise HTTPException(
+                409, "No pending move. Call /api/execute/run-step first."
+            )
+
+    trajectory: list[dict[str, float]] = pending["trajectory"]
+    speed = req.speed if req.speed is not None else pending["speed"]
+
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected. Call /api/motor/connect first.")
+
+    # Set speed
+    await asyncio.get_event_loop().run_in_executor(None, ctrl.set_speed, speed)
+
+    # Execute trajectory waypoint-by-waypoint
+    import time as _time
+
+    try:
+        for i, waypoint in enumerate(trajectory):
+            joints_list = [waypoint[name] for name in _MOTOR_NAMES_ORDER]
+            await asyncio.get_event_loop().run_in_executor(
+                None, ctrl.write_joint_array, joints_list, None
+            )
+            # Small delay between waypoints for smooth motion
+            if i < len(trajectory) - 1:
+                await asyncio.sleep(0.05)
+
+        print(f"[confirm-move] executed {len(trajectory)} waypoints at speed={speed}")
+    except Exception as e:
+        raise HTTPException(500, f"Motor execution error: {e}")
+
+    # Read final position
+    final_result = await asyncio.get_event_loop().run_in_executor(
+        None, ctrl.read_positions
+    )
+
+    # Clear pending move
+    with _pending_move_lock:
+        _pending_move = None
+
+    return {
+        "status": "executed",
+        "waypoints_sent": len(trajectory),
+        "speed": speed,
+        "target_robot_m": pending["target_robot_m"],
+        "distance_m": pending["distance_m"],
+        "final_positions_deg": final_result.get("positions_deg"),
+        "step": pending["step"],
+        "message": (
+            f"Executed {len(trajectory)}-waypoint trajectory. "
+            f"Moved {pending['distance_m'] * 100:.1f} cm toward "
+            f"{pending['target_keypoint'].get('label', 'target')}."
+        ),
+    }
+
+
+@app.get("/api/execute/pending-move")
+async def get_pending_move():
+    """Check whether there is a pending move awaiting confirmation."""
+    with _pending_move_lock:
+        if _pending_move is None:
+            return {"has_pending": False}
+        p = _pending_move
+        return {
+            "has_pending": True,
+            "target_keypoint": p["target_keypoint"],
+            "target_robot_m": p["target_robot_m"],
+            "current_tip_m": p["current_tip_m"],
+            "distance_m": p["distance_m"],
+            "q_target_deg": p["q_target_deg"],
+            "motion_steps": p["motion_steps"],
+            "speed": p["speed"],
+            "step": p["step"],
+        }
+
+
+@app.delete("/api/execute/pending-move")
+async def cancel_pending_move():
+    """Cancel the pending move without executing it."""
+    global _pending_move
+    with _pending_move_lock:
+        if _pending_move is None:
+            return {"status": "no_pending_move"}
+        _pending_move = None
+    return {"status": "cancelled"}
 
 
 # ---------------------------------------------------------------------------

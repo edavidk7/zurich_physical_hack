@@ -2,7 +2,7 @@
 // API client for DocOps backend
 // ---------------------------------------------------------------------------
 
-import type { DocumentsResponse, ExecuteResult, ChatMessage, ChatResponse, PipelineStage, SearchResultEvent, SearchErrorEvent, RobotExecuteResponse } from "./types";
+import type { DocumentsResponse, ExecuteResult, ChatMessage, ChatResponse, PipelineStage, SearchResultEvent, SearchErrorEvent, RobotExecuteResponse, RunStepResponse, ConfirmMoveResponse, PendingMoveResponse } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -349,5 +349,57 @@ export async function executeStepKeypoints(
       thinking_level: thinkingLevel ?? null,
       temperature,
     }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Run-Step Pipeline (automated: plan step → VLM → ArUco → IK → trajectory)
+// ---------------------------------------------------------------------------
+
+export async function runStep(
+  step: Record<string, unknown>,
+  referenceImages: { doc_name: string; image_name: string }[],
+  options?: {
+    model?: string;
+    thinkingBudget?: number;
+    thinkingLevel?: string;
+    temperature?: number;
+    planeOffsetM?: number;
+    motionSteps?: number;
+    speed?: number;
+  },
+): Promise<RunStepResponse> {
+  return apiFetch<RunStepResponse>("/api/execute/run-step", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      step,
+      reference_images: referenceImages,
+      model: options?.model ?? "gemini-3-flash-preview",
+      thinking_budget: options?.thinkingBudget ?? 0,
+      thinking_level: options?.thinkingLevel ?? null,
+      temperature: options?.temperature ?? 1.0,
+      plane_offset_m: options?.planeOffsetM ?? 0.003,
+      motion_steps: options?.motionSteps ?? 40,
+      speed: options?.speed ?? 15,
+    }),
+  });
+}
+
+export async function confirmMove(speed?: number): Promise<ConfirmMoveResponse> {
+  return apiFetch<ConfirmMoveResponse>("/api/execute/confirm-move", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ speed: speed ?? null }),
+  });
+}
+
+export async function getPendingMove(): Promise<PendingMoveResponse> {
+  return apiFetch<PendingMoveResponse>("/api/execute/pending-move");
+}
+
+export async function cancelPendingMove(): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>("/api/execute/pending-move", {
+    method: "DELETE",
   });
 }

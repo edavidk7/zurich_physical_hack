@@ -160,3 +160,54 @@ export interface KeypointResponse {
   prompt: string;
   camera_size: [number, number];
 }
+
+// ---------------------------------------------------------------------------
+// Run-Step Pipeline (automated: plan step -> VLM -> ArUco -> IK -> trajectory)
+// ---------------------------------------------------------------------------
+
+export interface RunStepResponse {
+  status: "pending_confirmation";
+  annotated_image: string;
+  keypoints: { label: string; point: [number, number] }[];
+  prompt: string;
+  target_keypoint: { label: string; point: [number, number] } | null;
+  probe_keypoint: { label: string; point: [number, number] } | null;
+  pixel_uv: [number, number];
+  pos_cam_m: [number, number, number];
+  pos_board_m: [number, number, number];
+  depth_m: number;
+  target_robot_m: [number, number, number];
+  current_tip_m: [number, number, number];
+  delta_m: [number, number, number];
+  distance_m: number;
+  q_current_deg: Record<string, number>;
+  q_target_deg: Record<string, number>;
+  ik_error_m: number;
+  motion_steps: number;
+  n_markers: number;
+  reprojection_err_px: number;
+  camera_size: [number, number];
+}
+
+export interface ConfirmMoveResponse {
+  status: "executed";
+  waypoints_sent: number;
+  speed: number;
+  target_robot_m: [number, number, number];
+  distance_m: number;
+  final_positions_deg: Record<string, number> | null;
+  step: Record<string, unknown>;
+  message: string;
+}
+
+export interface PendingMoveResponse {
+  has_pending: boolean;
+  target_keypoint?: { label: string; point: [number, number] };
+  target_robot_m?: [number, number, number];
+  current_tip_m?: [number, number, number];
+  distance_m?: number;
+  q_target_deg?: Record<string, number>;
+  motion_steps?: number;
+  speed?: number;
+  step?: Record<string, unknown>;
+}

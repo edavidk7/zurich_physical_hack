@@ -62,6 +62,9 @@ import {
   motorMove,
   motorSetSpeed,
   getTooltipProjection,
+  runStep,
+  confirmMove,
+  cancelPendingMove,
 } from "@/lib/api";
 import type { EEPosition, IKResult, TooltipProjection, MoveToKeypointResult } from "@/lib/api";
 
@@ -73,6 +76,8 @@ import type {
   ChatMessage,
   SearchResultEvent,
   KeypointResponse,
+  RunStepResponse,
+  ConfirmMoveResponse,
 } from "@/lib/types";
 
 const ArmSimulator = dynamic(() => import("@/components/ArmSimulator"), {
@@ -520,7 +525,7 @@ function TaskPage({
             {([
               { key: "plan" as const, icon: <Layers size={14} />, label: "Task Plan" },
               { key: "sources" as const, icon: <Search size={14} />, label: "Source Documents" },
-              { key: "keypoints" as const, icon: <Camera size={14} />, label: "Keypoints" },
+              { key: "keypoints" as const, icon: <Crosshair size={14} />, label: "Execute Step" },
               { key: "json" as const, icon: <Code2 size={14} />, label: "JSON" },
             ]).map((t) => (
               <button
@@ -997,59 +1002,23 @@ function SourceCard({ result }: { result: SearchResult }) {
 
 const KEYPOINT_COLORS = ["#00ff00", "#ff00ff", "#00ffff", "#ffff00", "#ff8800"];
 
+const JOINT_ORDER = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
+
 function KeypointsTab({ result }: { result: ExecuteResult | null }) {
-  const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [kpResult, setKpResult] = useState<KeypointResponse | null>(null);
+  // Pipeline state
+  const [selectedStep, setSelectedStep] = useState<Step | null>(null);
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [pipelineError, setPipelineError] = useState("");
+  const [stepResult, setStepResult] = useState<RunStepResponse | null>(null);
 
-  // Move-to-keypoint state
-  const [selectedKp, setSelectedKp] = useState<number | null>(null);
-  const [moveResult, setMoveResult] = useState<MoveToKeypointResult | null>(null);
-  const [movePlanning, setMovePlanning] = useState(false);
-  const [moveExecuting, setMoveExecuting] = useState(false);
-  const [moveError, setMoveError] = useState("");
+  // Confirm/cancel state
+  const [confirming, setConfirming] = useState(false);
+  const [confirmResult, setConfirmResult] = useState<ConfirmMoveResponse | null>(null);
+  const [confirmError, setConfirmError] = useState("");
+  const [cancelled, setCancelled] = useState(false);
 
-  async function handlePlanMove() {
-    if (selectedKp === null || !kpResult) return;
-    const kp = kpResult.keypoints[selectedKp];
-    setMovePlanning(true);
-    setMoveError("");
-    setMoveResult(null);
-    try {
-      const res = await moveToKeypoint(kp.point[0], kp.point[1], true);
-      setMoveResult(res);
-    } catch (e: unknown) {
-      setMoveError(e instanceof Error ? e.message : "Planning failed");
-    } finally {
-      setMovePlanning(false);
-    }
-  }
-
-  async function handleExecuteMove() {
-    if (selectedKp === null || !kpResult) return;
-    const kp = kpResult.keypoints[selectedKp];
-    setMoveExecuting(true);
-    setMoveError("");
-    try {
-      const res = await moveToKeypoint(kp.point[0], kp.point[1], false);
-      setMoveResult(res);
-    } catch (e: unknown) {
-      setMoveError(e instanceof Error ? e.message : "Move failed");
-    } finally {
-      setMoveExecuting(false);
-    }
-  }
-
-  const defaultPrompt = (() => {
-    const steps = result?.task_plan?.task_plan?.steps ?? [];
-    const probeStep = steps.find((s: Step) => ["PROBE", "MOVE", "MEASURE"].includes(s.action));
-    if (!probeStep) return "";
-    const pos = (probeStep.parameters as Record<string, string | undefined> | undefined)?.probe_positive;
-    return pos
-      ? `Locate ${pos} on the board, and the tip of the positive multimeter probe`
-      : `Locate the target component and the tip of the positive multimeter probe`;
-  })();
+  // Pipeline progress stages
+  const [pipelinePhase, setPipelinePhase] = useState("");
 
   const referenceImages = (result?.search_results ?? []).flatMap((sr) =>
     (sr.extracted_info?.relevant_images ?? []).map((img) => {
@@ -1061,212 +1030,532 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
     })
   );
 
-  async function handleRun() {
-    const p = prompt.trim() || defaultPrompt;
-    if (!p) return;
-    setLoading(true);
-    setError("");
-    setKpResult(null);
-    setSelectedKp(null);
-    setMoveResult(null);
-    setMoveError("");
+  // Find actionable steps from the plan
+  const steps = result?.task_plan?.task_plan?.steps ?? [];
+  const actionableSteps = steps.filter((s: Step) =>
+    ["PROBE", "MOVE", "MEASURE"].includes(s.action)
+  );
+
+  async function handleRunStep(step: Step) {
+    setSelectedStep(step);
+    setPipelineRunning(true);
+    setPipelineError("");
+    setStepResult(null);
+    setConfirmResult(null);
+    setConfirmError("");
+    setCancelled(false);
+
+    setPipelinePhase("Generating VLM prompt & capturing camera frame...");
+
     try {
-      const res = await locateKeypoints(p, referenceImages);
-      setKpResult(res);
+      const res = await runStep(
+        step as unknown as Record<string, unknown>,
+        referenceImages,
+      );
+      setStepResult(res);
+      setPipelinePhase("");
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Unknown error");
+      setPipelineError(e instanceof Error ? e.message : "Pipeline failed");
+      setPipelinePhase("");
     } finally {
-      setLoading(false);
+      setPipelineRunning(false);
     }
   }
 
-  if (!result?.task_plan) {
-    return <EmptyState icon={<Camera size={32} />} text="Execute a task first to enable keypoint localisation." />;
+  async function handleConfirm() {
+    setConfirming(true);
+    setConfirmError("");
+    setConfirmResult(null);
+    try {
+      const res = await confirmMove();
+      setConfirmResult(res);
+    } catch (e: unknown) {
+      setConfirmError(e instanceof Error ? e.message : "Execution failed");
+    } finally {
+      setConfirming(false);
+    }
   }
 
-  return (
-    <div className="animate-slide-up space-y-5">
-      <div className="space-y-2">
-        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-          Keypoint prompt
-        </label>
-        <textarea
-          className="w-full text-sm border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-teal-400 resize-none"
-          rows={2}
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder={defaultPrompt || "e.g. locate the 5V LDO regulator and the positive multimeter probe tip"}
-        />
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleRun}
-            disabled={loading}
-            className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            {loading ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
-            {loading ? "Capturing & analysing\u2026" : "Locate on Camera"}
-          </button>
-          {referenceImages.length > 0 && (
-            <span className="text-xs text-gray-400">
-              {referenceImages.length} reference image{referenceImages.length !== 1 ? "s" : ""} from docs
-            </span>
-          )}
+  async function handleCancel() {
+    try {
+      await cancelPendingMove();
+      setCancelled(true);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function handleReset() {
+    setSelectedStep(null);
+    setStepResult(null);
+    setConfirmResult(null);
+    setConfirmError("");
+    setPipelineError("");
+    setCancelled(false);
+    setPipelinePhase("");
+  }
+
+  if (!result?.task_plan) {
+    return <EmptyState icon={<Camera size={32} />} text="Execute a task first to enable the automated pipeline." />;
+  }
+
+  // ── If no step selected yet, show step picker ──
+  if (!selectedStep) {
+    return (
+      <div className="animate-slide-up space-y-5">
+        <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Automated Pipeline</h4>
+          <p className="text-sm text-gray-400 mb-4">
+            Select a step to run the full pipeline: VLM keypoint detection, ArUco 3D localisation,
+            camera-to-robot transform, IK solving, and trajectory planning.
+            Only the final move requires confirmation.
+          </p>
+        </div>
+
+        {actionableSteps.length === 0 ? (
+          <div className="text-sm text-gray-400 text-center py-8">
+            No PROBE / MOVE / MEASURE steps in the current plan.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {actionableSteps.map((step: Step) => (
+              <button
+                key={step.step_id}
+                onClick={() => handleRunStep(step)}
+                className="w-full flex items-start gap-3 p-4 rounded-xl border border-gray-200 bg-white hover:border-teal-400 hover:bg-teal-50/30 transition-colors text-left group"
+              >
+                <div className="w-8 h-8 rounded-full bg-teal-500 text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
+                  {step.step_id}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[11px] font-bold text-teal-700 uppercase tracking-wide">{step.action}</div>
+                  <div className="text-sm text-gray-800 mt-0.5">{step.description}</div>
+                  {step.parameters?.probe_positive && (
+                    <div className="text-xs text-gray-400 mt-1">
+                      Probe+: {step.parameters.probe_positive}
+                    </div>
+                  )}
+                </div>
+                <Play size={16} className="text-gray-300 group-hover:text-teal-500 mt-1 flex-shrink-0" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Pipeline is running ──
+  if (pipelineRunning) {
+    return (
+      <div className="animate-slide-up space-y-5">
+        <div className="flex items-center gap-3 p-4 rounded-xl border border-teal-200 bg-teal-50">
+          <Loader2 size={20} className="text-teal-600 animate-spin flex-shrink-0" />
+          <div>
+            <div className="text-sm font-semibold text-teal-800">
+              Running Pipeline for Step {selectedStep.step_id}: {selectedStep.action}
+            </div>
+            <div className="text-xs text-teal-600 mt-0.5">{pipelinePhase}</div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          {["Auto-generating VLM prompt from step parameters",
+            "Capturing camera frame & running Gemini VLM keypoint extraction",
+            "ArUco marker detection & 3D localisation (solvePnP + LM refinement)",
+            "Reading robot joint positions & computing camera-to-robot transform",
+            "Solving inverse kinematics for target position",
+            "Planning cosine-interpolated trajectory",
+          ].map((label, i) => (
+            <div key={i} className="flex items-center gap-2 py-1 px-2">
+              <Loader2 size={13} className="text-teal-400 animate-spin flex-shrink-0 opacity-50" />
+              <span className="text-xs text-gray-400">{label}</span>
+            </div>
+          ))}
         </div>
       </div>
+    );
+  }
 
-      {error && (
-        <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-          {error}
-        </div>
-      )}
-
-      {kpResult && (
-        <div className="space-y-4">
+  // ── Pipeline error ──
+  if (pipelineError) {
+    return (
+      <div className="animate-slide-up space-y-4">
+        <div className="flex items-start gap-3 p-4 rounded-xl border border-red-200 bg-red-50">
+          <XCircle size={18} className="text-red-500 flex-shrink-0 mt-0.5" />
           <div>
-            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Annotated Camera Frame</h4>
+            <div className="text-sm font-semibold text-red-800">Pipeline Failed</div>
+            <div className="text-xs text-red-600 mt-1 break-all">{pipelineError}</div>
+          </div>
+        </div>
+        <button onClick={handleReset} className="text-sm text-teal-600 hover:text-teal-800 font-medium">
+          &larr; Back to step selection
+        </button>
+      </div>
+    );
+  }
+
+  // ── Pipeline succeeded — show full telemetry ──
+  if (stepResult) {
+    const r = stepResult;
+    const ikErrorMm = r.ik_error_m * 1000;
+    const distCm = r.distance_m * 100;
+
+    return (
+      <div className="animate-slide-up space-y-5">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <button onClick={handleReset} className="text-xs text-teal-600 hover:text-teal-800 font-medium">
+            &larr; Back to steps
+          </button>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-gray-400 uppercase tracking-wider">Step {selectedStep.step_id}</span>
+            <span className="text-xs font-bold text-teal-700 uppercase">{selectedStep.action}</span>
+          </div>
+        </div>
+
+        {/* ── Confirm / Cancel bar ── */}
+        {!confirmResult && !cancelled && (
+          <div className="flex items-center gap-3 p-4 rounded-xl border-2 border-amber-300 bg-amber-50">
+            <AlertTriangle size={20} className="text-amber-500 flex-shrink-0" />
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-amber-800">Move pending confirmation</div>
+              <div className="text-xs text-amber-600 mt-0.5">
+                The robot will move {distCm.toFixed(1)} cm toward &ldquo;{r.target_keypoint?.label ?? "target"}&rdquo;.
+                Review the telemetry below before confirming.
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={handleCancel}
+                className="px-3 py-2 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirm}
+                disabled={confirming}
+                className="px-4 py-2 text-xs font-semibold text-white rounded-lg transition-colors flex items-center gap-1.5"
+                style={{ background: confirming ? "#9ca3af" : "linear-gradient(135deg, #37e0d8, #1a8a84)" }}
+              >
+                {confirming ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+                {confirming ? "Executing..." : "Confirm & Execute"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {confirmError && (
+          <div className="flex items-center gap-2 p-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700">
+            <XCircle size={14} /> {confirmError}
+          </div>
+        )}
+
+        {confirmResult && (
+          <div className="flex items-center gap-3 p-4 rounded-xl border border-emerald-200 bg-emerald-50">
+            <CheckCircle2 size={20} className="text-emerald-500 flex-shrink-0" />
+            <div>
+              <div className="text-sm font-semibold text-emerald-800">Move Executed</div>
+              <div className="text-xs text-emerald-600 mt-0.5">{confirmResult.message}</div>
+              {confirmResult.final_positions_deg && (
+                <div className="text-xs text-emerald-500 mt-1 font-mono">
+                  Final: [{JOINT_ORDER.map(k => (confirmResult.final_positions_deg?.[k] ?? 0).toFixed(1)).join(", ")}]°
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {cancelled && (
+          <div className="flex items-center gap-2 p-3 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-600">
+            <XCircle size={14} className="text-gray-400" /> Move cancelled.
+          </div>
+        )}
+
+        {/* ── 3D Simulator: current pose + target marker + ghost target pose ── */}
+        {(() => {
+          const executed = !!confirmResult?.final_positions_deg;
+          const simJoints = executed
+            ? JOINT_ORDER.map(j => confirmResult.final_positions_deg?.[j] ?? r.q_target_deg[j] ?? 0)
+            : JOINT_ORDER.map(j => r.q_current_deg[j] ?? 0);
+          return (
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className="p-3 border-b border-gray-100 flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1.5">
+                  <Move3d size={14} className="text-teal-500" />
+                  {executed ? "3D View \u2014 Final Pose" : "3D Preview \u2014 Current vs Target"}
+                </h3>
+                {!executed && (
+                  <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-teal-400 inline-block" /> Current tip</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-400 inline-block" /> Target</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-300 inline-block opacity-60" /> Ghost (target pose)</span>
+                  </div>
+                )}
+              </div>
+              <ArmSimulator
+                joints={simJoints}
+                targetJoints={executed ? undefined : JOINT_ORDER.map(j => r.q_target_deg[j] ?? 0)}
+                targetPosition={r.target_robot_m}
+                currentTipPosition={executed ? undefined : r.current_tip_m}
+                showTargetLine={!executed}
+                className="w-full h-[320px]"
+              />
+            </div>
+          );
+        })()}
+
+        {/* ── Top-level metrics ── */}
+        <div className="grid grid-cols-5 gap-2">
+          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider">Distance</div>
+            <div className="text-sm font-bold text-teal-700 font-mono">{distCm.toFixed(1)} cm</div>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider">IK Error</div>
+            <div className={`text-sm font-bold font-mono ${ikErrorMm < 1 ? "text-emerald-600" : ikErrorMm < 5 ? "text-amber-600" : "text-red-600"}`}>
+              {ikErrorMm.toFixed(3)} mm
+            </div>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider">ArUco Markers</div>
+            <div className="text-sm font-bold text-teal-700 font-mono">{r.n_markers}</div>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider">Reproj Err</div>
+            <div className={`text-sm font-bold font-mono ${r.reprojection_err_px < 1 ? "text-emerald-600" : "text-amber-600"}`}>
+              {r.reprojection_err_px.toFixed(2)} px
+            </div>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider">Waypoints</div>
+            <div className="text-sm font-bold text-teal-700 font-mono">{r.motion_steps}</div>
+          </div>
+        </div>
+
+        {/* ── Annotated Camera Frame ── */}
+        <details open className="group">
+          <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
+            <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
+            VLM Keypoint Detection
+          </summary>
+          <div className="space-y-3">
+            <div className="text-xs text-gray-400 bg-gray-50 rounded-lg px-3 py-2 font-mono break-all">
+              <span className="text-gray-500 font-medium">Prompt:</span> {r.prompt}
+            </div>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={`data:image/png;base64,${kpResult.annotated_image}`}
+              src={`data:image/png;base64,${r.annotated_image}`}
               alt="Annotated camera frame with keypoints"
               className="w-full rounded-xl border border-gray-200 object-contain"
             />
-          </div>
-
-          {kpResult.keypoints.length > 0 ? (
-            <div>
-              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                Detected Keypoints ({kpResult.keypoints.length}) &mdash; click one to plan a move
-              </h4>
-              <div className="space-y-2">
-                {kpResult.keypoints.map((kp, i) => {
-                  const isSelected = selectedKp === i;
-                  return (
-                    <button
-                      key={i}
-                      onClick={() => { setSelectedKp(i); setMoveResult(null); setMoveError(""); }}
-                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors text-left ${
-                        isSelected
-                          ? "border-teal-400 bg-teal-50 ring-2 ring-teal-300"
-                          : "border-gray-200 bg-gray-50 hover:border-teal-200 hover:bg-teal-50/50"
-                      }`}
-                    >
-                      <span
-                        className="w-3 h-3 rounded-full flex-shrink-0 border-2"
-                        style={{ borderColor: KEYPOINT_COLORS[i % KEYPOINT_COLORS.length], backgroundColor: isSelected ? KEYPOINT_COLORS[i % KEYPOINT_COLORS.length] : "black" }}
-                      />
-                      <span className="text-sm font-medium text-gray-800 flex-1">{kp.label}</span>
-                      <span className="text-xs text-gray-400 font-mono">
-                        norm ({kp.point[1]}, {kp.point[0]})
-                      </span>
-                      {isSelected && <Crosshair size={14} className="text-teal-600" />}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            <div className="text-sm text-gray-400 text-center py-4">
-              No keypoints detected &mdash; try rephrasing the prompt.
-            </div>
-          )}
-
-          {/* Move planning & execution panel */}
-          {selectedKp !== null && kpResult.keypoints[selectedKp] && (
-            <div className="space-y-3 border border-teal-200 rounded-xl p-4 bg-teal-50/50">
-              <h4 className="text-xs font-semibold text-teal-700 uppercase tracking-wide flex items-center gap-2">
-                <Move3d size={14} />
-                Move to: {kpResult.keypoints[selectedKp].label}
-              </h4>
-
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handlePlanMove}
-                  disabled={movePlanning || moveExecuting}
-                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
-                >
-                  {movePlanning ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-                  {movePlanning ? "Planning\u2026" : "Plan Move (Dry Run)"}
-                </button>
-
-                {moveResult && !moveResult.moved && moveResult.distance_m > 0.001 && (
-                  <button
-                    onClick={handleExecuteMove}
-                    disabled={moveExecuting}
-                    className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+            <div className="space-y-1.5">
+              {r.keypoints.map((kp, i) => {
+                const isTarget = r.target_keypoint && kp.label === r.target_keypoint.label;
+                const isProbe = r.probe_keypoint && kp.label === r.probe_keypoint.label;
+                return (
+                  <div
+                    key={i}
+                    className={`flex items-center gap-3 px-3 py-2 rounded-lg border text-xs ${
+                      isTarget ? "border-teal-300 bg-teal-50" :
+                      isProbe ? "border-blue-200 bg-blue-50" :
+                      "border-gray-100 bg-gray-50"
+                    }`}
                   >
-                    {moveExecuting ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                    {moveExecuting ? "Moving\u2026" : "Execute Move"}
-                  </button>
-                )}
-              </div>
-
-              {moveError && (
-                <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                  {moveError}
-                </div>
-              )}
-
-              {moveResult && (
-                <div className="space-y-2 text-sm">
-                  <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${
-                    moveResult.moved
-                      ? "border-green-200 bg-green-50 text-green-700"
-                      : "border-blue-200 bg-blue-50 text-blue-700"
-                  }`}>
-                    {moveResult.moved ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
-                    {moveResult.message}
+                    <span
+                      className="w-3 h-3 rounded-full flex-shrink-0 border-2"
+                      style={{ borderColor: KEYPOINT_COLORS[i % KEYPOINT_COLORS.length], backgroundColor: KEYPOINT_COLORS[i % KEYPOINT_COLORS.length] }}
+                    />
+                    <span className="font-medium text-gray-700 flex-1">{kp.label}</span>
+                    <span className="text-gray-400 font-mono">
+                      norm ({kp.point[1]}, {kp.point[0]})
+                    </span>
+                    {isTarget && <span className="text-[10px] font-bold text-teal-600 uppercase">Target</span>}
+                    {isProbe && <span className="text-[10px] font-bold text-blue-600 uppercase">Probe</span>}
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
-                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
-                      <span className="text-gray-400">Distance:</span>{" "}
-                      <span className="font-mono font-medium">{(moveResult.distance_m * 100).toFixed(1)} cm</span>
-                    </div>
-                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
-                      <span className="text-gray-400">Cam height:</span>{" "}
-                      <span className="font-mono font-medium">{moveResult.cam_height_mm.toFixed(0)} mm</span>
-                    </div>
-                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
-                      <span className="text-gray-400">Robot dx:</span>{" "}
-                      <span className="font-mono font-medium">{(moveResult.delta_robot_m.x * 100).toFixed(2)} cm</span>
-                    </div>
-                    <div className="bg-white rounded-lg px-3 py-2 border border-gray-100">
-                      <span className="text-gray-400">Robot dy:</span>{" "}
-                      <span className="font-mono font-medium">{(moveResult.delta_robot_m.y * 100).toFixed(2)} cm</span>
-                    </div>
-                  </div>
-                </div>
-              )}
+                );
+              })}
             </div>
-          )}
+          </div>
+        </details>
 
-          {(() => {
-            const steps = result?.task_plan?.task_plan?.steps ?? [];
-            const relevant = steps.filter((s: Step) =>
-              ["PROBE", "MOVE", "MEASURE"].includes(s.action)
-            );
-            if (!relevant.length) return null;
-            return (
-              <div>
-                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                  Planned Arm Movements
-                </h4>
-                <div className="space-y-2">
-                  {relevant.map((s: Step, i: number) => (
-                    <div key={i} className="flex gap-3 px-4 py-3 rounded-xl border border-teal-100 bg-teal-50">
-                      <span className="text-xs font-bold text-teal-600 uppercase w-16 flex-shrink-0 pt-0.5">
-                        {s.action}
-                      </span>
-                      <span className="text-sm text-gray-700">{s.description}</span>
-                    </div>
-                  ))}
-                </div>
+        {/* ── ArUco Localisation ── */}
+        <details open className="group">
+          <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
+            <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
+            ArUco 3D Localisation
+          </summary>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Pixel Coordinates</div>
+              <div className="text-xs font-mono text-gray-700">
+                u: {r.pixel_uv[0].toFixed(1)} px &nbsp; v: {r.pixel_uv[1].toFixed(1)} px
               </div>
-            );
-          })()}
-        </div>
-      )}
-    </div>
-  );
+              <div className="text-[10px] text-gray-400">Camera: {r.camera_size[0]} x {r.camera_size[1]}</div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Depth</div>
+              <div className="text-xs font-mono text-gray-700">
+                {(r.depth_m * 1000).toFixed(1)} mm ({r.depth_m.toFixed(4)} m)
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Camera Frame (3D)</div>
+              <div className="text-xs font-mono text-gray-700">
+                x: {r.pos_cam_m[0].toFixed(5)} m<br />
+                y: {r.pos_cam_m[1].toFixed(5)} m<br />
+                z: {r.pos_cam_m[2].toFixed(5)} m
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Board Frame (3D)</div>
+              <div className="text-xs font-mono text-gray-700">
+                x: {r.pos_board_m[0].toFixed(5)} m<br />
+                y: {r.pos_board_m[1].toFixed(5)} m<br />
+                z: {r.pos_board_m[2].toFixed(5)} m
+              </div>
+            </div>
+          </div>
+        </details>
+
+        {/* ── Camera → Robot Transform ── */}
+        <details open className="group">
+          <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
+            <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
+            Camera → Robot Transform
+          </summary>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Target (Robot Frame)</div>
+              <div className="text-xs font-mono text-gray-700">
+                x: {r.target_robot_m[0].toFixed(5)} m<br />
+                y: {r.target_robot_m[1].toFixed(5)} m<br />
+                z: {r.target_robot_m[2].toFixed(5)} m
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Current Tip (Robot Frame)</div>
+              <div className="text-xs font-mono text-gray-700">
+                x: {r.current_tip_m[0].toFixed(5)} m<br />
+                y: {r.current_tip_m[1].toFixed(5)} m<br />
+                z: {r.current_tip_m[2].toFixed(5)} m
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Delta (Target - Current)</div>
+              <div className="text-xs font-mono text-gray-700">
+                dx: {(r.delta_m[0] * 100).toFixed(2)} cm<br />
+                dy: {(r.delta_m[1] * 100).toFixed(2)} cm<br />
+                dz: {(r.delta_m[2] * 100).toFixed(2)} cm
+              </div>
+            </div>
+          </div>
+        </details>
+
+        {/* ── IK Solution & Joint Comparison ── */}
+        <details open className="group">
+          <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
+            <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
+            Inverse Kinematics Solution
+          </summary>
+          <div className="space-y-3">
+            <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+              ikErrorMm < 1 ? "border-emerald-200 bg-emerald-50 text-emerald-700" :
+              ikErrorMm < 5 ? "border-amber-200 bg-amber-50 text-amber-700" :
+              "border-red-200 bg-red-50 text-red-700"
+            }`}>
+              {ikErrorMm < 1 ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+              IK error: {ikErrorMm.toFixed(3)} mm
+              {ikErrorMm < 1 ? " — excellent" : ikErrorMm < 5 ? " — acceptable" : " — target may be near workspace limit"}
+            </div>
+
+            {/* Joint comparison table */}
+            <div className="overflow-hidden rounded-lg border border-gray-200">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="text-left px-3 py-2 text-gray-500 font-semibold">Joint</th>
+                    <th className="text-right px-3 py-2 text-gray-500 font-semibold">Current (°)</th>
+                    <th className="text-right px-3 py-2 text-gray-500 font-semibold">Target (°)</th>
+                    <th className="text-right px-3 py-2 text-gray-500 font-semibold">Delta (°)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {JOINT_ORDER.filter(j => j !== "gripper").map((joint) => {
+                    const cur = r.q_current_deg[joint] ?? 0;
+                    const tgt = r.q_target_deg[joint] ?? 0;
+                    const delta = tgt - cur;
+                    return (
+                      <tr key={joint} className="border-b border-gray-50 last:border-0">
+                        <td className="px-3 py-1.5 font-mono text-gray-600">{joint}</td>
+                        <td className="px-3 py-1.5 text-right font-mono text-gray-500">{cur.toFixed(2)}</td>
+                        <td className="px-3 py-1.5 text-right font-mono text-teal-700 font-medium">{tgt.toFixed(2)}</td>
+                        <td className={`px-3 py-1.5 text-right font-mono font-medium ${
+                          Math.abs(delta) > 30 ? "text-amber-600" : "text-gray-500"
+                        }`}>
+                          {delta >= 0 ? "+" : ""}{delta.toFixed(2)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+
+        {/* ── Trajectory Summary ── */}
+        <details className="group">
+          <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
+            <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
+            Trajectory ({r.motion_steps} waypoints, cosine interpolation)
+          </summary>
+          <div className="bg-gray-50 rounded-lg p-3">
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div>
+                <span className="text-gray-400">Start:</span>{" "}
+                <span className="font-mono text-gray-600">
+                  [{JOINT_ORDER.filter(j => j !== "gripper").map(j => (r.q_current_deg[j] ?? 0).toFixed(1)).join(", ")}]°
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-400">End:</span>{" "}
+                <span className="font-mono text-gray-600">
+                  [{JOINT_ORDER.filter(j => j !== "gripper").map(j => (r.q_target_deg[j] ?? 0).toFixed(1)).join(", ")}]°
+                </span>
+              </div>
+            </div>
+            {/* Visual joint delta bars */}
+            <div className="mt-3 space-y-1">
+              {JOINT_ORDER.filter(j => j !== "gripper").map((joint) => {
+                const cur = r.q_current_deg[joint] ?? 0;
+                const tgt = r.q_target_deg[joint] ?? 0;
+                const delta = tgt - cur;
+                const maxDelta = 180;
+                const pct = Math.min(Math.abs(delta) / maxDelta * 100, 100);
+                return (
+                  <div key={joint} className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono text-gray-400 w-24 truncate">{joint}</span>
+                    <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${Math.abs(delta) > 50 ? "bg-amber-400" : "bg-teal-400"}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-[10px] font-mono text-gray-400 w-12 text-right">
+                      {delta >= 0 ? "+" : ""}{delta.toFixed(1)}°
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </details>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 /* ========================================================================= */
