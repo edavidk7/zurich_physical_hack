@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from src.camera import CameraCapture, CameraConfig
 from src.high_level_planner import (
     extract_keypoints,
+    extract_action,
     annotate_image_pil,
     annotated_image_to_base64,
     load_and_prep_image,
@@ -208,7 +209,10 @@ async def upload_document(file: UploadFile = File(...)):
     stem = Path(file.filename).stem
     existing = PARSED_DIR / f"{stem}_parsed.md"
     if existing.exists():
-        return {"status": "exists", "message": f"{file.filename} already in knowledge base"}
+        return {
+            "status": "exists",
+            "message": f"{file.filename} already in knowledge base",
+        }
 
     upload_path = UPLOAD_DIR / file.filename
     content = await file.read()
@@ -482,7 +486,9 @@ async def chat(req: ChatRequest):
     # Gather all document content
     docs = sorted(PARSED_DIR.glob("*_parsed.md"))
     if not docs:
-        return {"reply": "No documents in the knowledge base yet. Upload some PDFs first!"}
+        return {
+            "reply": "No documents in the knowledge base yet. Upload some PDFs first!"
+        }
 
     doc_context_parts = []
     for md_file in docs:
@@ -496,7 +502,9 @@ async def chat(req: ChatRequest):
     doc_context = "\n\n".join(doc_context_parts)
 
     # Build conversation prompt
-    conversation = f"KNOWLEDGE BASE DOCUMENTS:\n\n{doc_context}\n\n---\n\nCONVERSATION:\n"
+    conversation = (
+        f"KNOWLEDGE BASE DOCUMENTS:\n\n{doc_context}\n\n---\n\nCONVERSATION:\n"
+    )
     for msg in req.history:
         role_label = "User" if msg.role == "user" else "Assistant"
         conversation += f"\n{role_label}: {msg.content}\n"
@@ -512,7 +520,11 @@ async def chat(req: ChatRequest):
             temperature=0.3,
             max_output_tokens=4096,
         )
-        reply = response.text.strip() if response.text else "I couldn't generate a response."
+        reply = (
+            response.text.strip()
+            if response.text
+            else "I couldn't generate a response."
+        )
     except Exception as e:
         reply = f"Error: {e}"
 
@@ -594,7 +606,10 @@ _MOTOR_NAMES_ORDER = [
 
 
 class FKRequest(BaseModel):
-    joints_deg: list[float]  # 6 values: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
+    joints_deg: list[
+        float
+    ]  # 6 values: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
+
 
 
 class IKRequest(BaseModel):
@@ -734,6 +749,7 @@ async def inverse_kinematics(req: IKRequest):
     }
 
 
+
 @app.get("/api/kinematics/home")
 async def kinematics_home():
     """Return the home pose joint angles and corresponding EE position."""
@@ -777,7 +793,9 @@ async def motor_connect(req: MotorConnectRequest):
     if not port:
         port = find_robot_port()
         if not port:
-            raise HTTPException(400, "No robot serial port detected. Specify port manually.")
+            raise HTTPException(
+                400, "No robot serial port detected. Specify port manually."
+            )
     ctrl = get_motor_controller()
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, ctrl.connect, port)
@@ -1041,7 +1059,9 @@ async def step_keypoints(req: StepKeypointRequest):
         if not img_path.exists():
             img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
         if not img_path.exists():
-            raise HTTPException(404, f"Reference image not found: {ri.doc_name}/{ri.image_name}")
+            raise HTTPException(
+                404, f"Reference image not found: {ri.doc_name}/{ri.image_name}"
+            )
         ref_pil.append(load_and_prep_image(img_path))
 
     try:
@@ -1091,7 +1111,9 @@ async def locate_keypoints(req: KeypointRequest):
         if not img_path.exists():
             img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
         if not img_path.exists():
-            raise HTTPException(404, f"Reference image not found: {ri.doc_name}/{ri.image_name}")
+            raise HTTPException(
+                404, f"Reference image not found: {ri.doc_name}/{ri.image_name}"
+            )
         ref_pil.append(load_and_prep_image(img_path))
 
     try:
@@ -1123,6 +1145,326 @@ async def locate_keypoints(req: KeypointRequest):
         "prompt": req.prompt,
         "camera_size": list(camera_pil.size),
     }
+
+
+# ---------------------------------------------------------------------------
+# Routes — Closed-loop placement (SSE)
+# ---------------------------------------------------------------------------
+
+
+class ClosedLoopRequest(BaseModel):
+    prompt: str
+    reference_images: list[ReferenceImage] = []
+    model: str = "gemini-3-flash-preview"
+    thinking_budget: int = 1024
+    max_iterations: int = 10
+    confidence_threshold: float = 0.9
+    z_offset_mm: float = 2.5
+    calib: str = "data/arm_cam_calib/calibration.json"
+    dry_run: bool = False
+    mock_image: str | None = (
+        None  # path to a saved image; skips live camera capture when set
+    )
+
+
+@app.post("/api/robot/closed-loop")
+async def closed_loop(req: ClosedLoopRequest):
+    """
+    SSE endpoint: run the closed-loop keypoint placement loop.
+
+    Streams one JSON event per iteration:
+      event: iteration
+      data: {"iteration": N, "action": "look"|"place", "point": [y,x],
+              "reason"?: str, "label"?: str, "confidence"?: float,
+              "annotated_image": "<base64 png>", "pose_available": bool}
+
+    Final event:
+      event: done
+      data: {"success": bool, "message": str}
+    """
+    import io
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageOps
+
+    # Lazy imports to avoid loading these at startup
+    from src.pose_estimation import estimate_camera_pose, compute_movement_to_keypoint
+
+    async def event_stream():
+        def send(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        # ── load reference images ───────────────────────────────────────────
+        ref_pil: list[Image.Image] = []
+        for ri in req.reference_images:
+            clean = ri.doc_name.replace("_parsed", "")
+            img_path = PARSED_DIR / f"{clean}_images" / ri.image_name
+            if not img_path.exists():
+                img_path = PARSED_DIR / f"{ri.doc_name}_images" / ri.image_name
+            if not img_path.exists():
+                yield send(
+                    "done",
+                    {
+                        "success": False,
+                        "message": f"Reference image not found: {ri.doc_name}/{ri.image_name}",
+                    },
+                )
+                return
+            ref_pil.append(load_and_prep_image(img_path))
+
+        # ── robot setup (skip in dry_run) ───────────────────────────────────
+        robot = None
+        q = None  # current joint angles
+
+        if not req.dry_run:
+            try:
+                import sys
+
+                sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+                from move_arm_cartesian import (
+                    cartesian_move,
+                    fk,
+                    obs_to_q,
+                    ALL_JOINTS,
+                    PORT,
+                    ROBOT_ID,
+                    N_STEPS,
+                )
+                from lerobot.robots.so_follower.config_so_follower import (
+                    SOFollowerRobotConfig,
+                )
+                from lerobot.robots.so_follower.so_follower import SOFollower
+
+                config = SOFollowerRobotConfig(port=PORT, id=ROBOT_ID)
+                robot = SOFollower(config)
+                robot.connect()
+            except Exception as e:
+                yield send(
+                    "done",
+                    {"success": False, "message": f"Robot connection failed: {e}"},
+                )
+                return
+        else:
+            # still need these helpers for delta computation in dry_run
+            import sys
+
+            sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+            from move_arm_cartesian import cartesian_move, fk, obs_to_q, N_STEPS
+
+        MAX_LOWER_M = 0.20
+
+        def cam_delta_to_robot(dx_cam_mm, dy_cam_mm, dz_mm=0.0):
+            return np.array([dy_cam_mm / 1000.0, -dx_cam_mm / 1000.0, -dz_mm / 1000.0])
+
+        try:
+            for iteration in range(1, req.max_iterations + 1):
+                await asyncio.sleep(0)  # yield to event loop
+
+                # ── capture frame ───────────────────────────────────────────
+                try:
+                    if req.mock_image:
+                        camera_pil = Image.open(req.mock_image).convert("RGB")
+                    else:
+                        cam = _get_camera()
+                        loop = asyncio.get_event_loop()
+                        jpeg_bytes = await loop.run_in_executor(None, cam.capture_jpeg)
+                        camera_pil = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+                    bgr = cv2.cvtColor(np.array(camera_pil), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    yield send(
+                        "done", {"success": False, "message": f"Camera error: {e}"}
+                    )
+                    return
+
+                img_h, img_w = bgr.shape[:2]
+
+                # ── pose estimation ─────────────────────────────────────────
+                pose_available = False
+                rvec = tvec = K = D = None
+                cam_height_mm = None
+                try:
+                    success, rvec, tvec, K, D = await asyncio.to_thread(
+                        estimate_camera_pose, bgr, req.calib
+                    )
+                    if success:
+                        pose_available = True
+                        cam_height_mm = float(tvec.flatten()[2])
+                except Exception:
+                    pass
+
+                # ── VLM decision ────────────────────────────────────────────
+                try:
+                    decision = await asyncio.to_thread(
+                        extract_action,
+                        ref_pil,
+                        camera_pil,
+                        req.prompt,
+                        req.model,
+                        req.thinking_budget,
+                    )
+                except Exception as e:
+                    decision = {
+                        "action": "look",
+                        "point": [500, 500],
+                        "reason": f"VLM error: {e}",
+                    }
+
+                action = decision["action"]
+                norm_y, norm_x = (
+                    float(decision["point"][0]),
+                    float(decision["point"][1]),
+                )
+                conf = float(decision.get("confidence", 0.0))
+
+                # demote low-confidence place → look
+                if action == "place" and conf < req.confidence_threshold:
+                    decision = {
+                        "action": "look",
+                        "point": decision["point"],
+                        "reason": f"confidence {conf:.2f} below threshold {req.confidence_threshold}",
+                    }
+                    action = "look"
+
+                # annotated frame for the UI
+                ann_kp = [
+                    {"point": [norm_y, norm_x], "label": f"{action} (iter {iteration})"}
+                ]
+                annotated = annotate_image_pil(camera_pil, ann_kp)
+                img_b64 = annotated_image_to_base64(annotated)
+
+                event_data: dict = {
+                    "iteration": iteration,
+                    "action": action,
+                    "point": [norm_y, norm_x],
+                    "annotated_image": img_b64,
+                    "pose_available": pose_available,
+                    "cam_height_mm": cam_height_mm,
+                }
+                if action == "look":
+                    event_data["reason"] = decision.get("reason", "")
+                else:
+                    event_data["label"] = decision.get("label", "")
+                    event_data["confidence"] = conf
+
+                yield send("iteration", event_data)
+                await asyncio.sleep(0)
+
+                # ── execute action ──────────────────────────────────────────
+                if action == "look":
+                    if not pose_available:
+                        continue  # can't move without pose; just re-query
+                    delta_cam = await asyncio.to_thread(
+                        compute_movement_to_keypoint,
+                        norm_y,
+                        norm_x,
+                        rvec,
+                        tvec,
+                        K,
+                        D,
+                        img_w,
+                        img_h,
+                    )
+                    delta_robot = cam_delta_to_robot(delta_cam[0], delta_cam[1], 0.0)
+                    dist_m = float(np.linalg.norm(delta_robot[:2]))
+
+                    if dist_m < 0.001:
+                        continue  # already centred
+
+                    if not req.dry_run:
+                        nonlocal_q = q
+                        if nonlocal_q is None:
+                            obs = await asyncio.to_thread(robot.get_observation)
+                            nonlocal_q = obs_to_q(obs)
+                        n_steps = max(N_STEPS, int(dist_m / 0.0025))
+                        nonlocal_q = await asyncio.to_thread(
+                            cartesian_move, robot, nonlocal_q, delta_robot, n_steps
+                        )
+                        q = nonlocal_q
+                        await asyncio.sleep(0.5)
+
+                elif action == "place":
+                    if not pose_available:
+                        yield send(
+                            "done",
+                            {
+                                "success": False,
+                                "message": "Place requested but no pose available.",
+                            },
+                        )
+                        return
+
+                    delta_cam = await asyncio.to_thread(
+                        compute_movement_to_keypoint,
+                        norm_y,
+                        norm_x,
+                        rvec,
+                        tvec,
+                        K,
+                        D,
+                        img_w,
+                        img_h,
+                    )
+                    lateral = cam_delta_to_robot(delta_cam[0], delta_cam[1], 0.0)
+                    dz_cam_mm = cam_height_mm - req.z_offset_mm
+                    z_delta = cam_delta_to_robot(0.0, 0.0, dz_cam_mm)
+
+                    if abs(z_delta[2]) > MAX_LOWER_M:
+                        yield send(
+                            "done",
+                            {
+                                "success": False,
+                                "message": f"Z delta {z_delta[2] * 100:.1f} cm exceeds safety limit.",
+                            },
+                        )
+                        return
+
+                    if not req.dry_run:
+                        nonlocal_q = q
+                        if nonlocal_q is None:
+                            obs = await asyncio.to_thread(robot.get_observation)
+                            nonlocal_q = obs_to_q(obs)
+                        dist_m = float(np.linalg.norm(lateral[:2]))
+                        if dist_m > 0.001:
+                            n_lat = max(N_STEPS, int(dist_m / 0.0025))
+                            nonlocal_q = await asyncio.to_thread(
+                                cartesian_move, robot, nonlocal_q, lateral, n_lat
+                            )
+                            await asyncio.sleep(0.5)
+                        n_z = max(N_STEPS, int(abs(z_delta[2]) / 0.0025))
+                        nonlocal_q = await asyncio.to_thread(
+                            cartesian_move, robot, nonlocal_q, z_delta, n_z
+                        )
+                        q = nonlocal_q
+
+                    yield send(
+                        "done",
+                        {
+                            "success": True,
+                            "message": f"Placed at iteration {iteration}.",
+                        },
+                    )
+                    return
+
+            yield send(
+                "done",
+                {
+                    "success": False,
+                    "message": f"Max iterations ({req.max_iterations}) reached without a successful place.",
+                },
+            )
+
+        finally:
+            if robot is not None:
+                try:
+                    robot.disconnect()
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 # ---------------------------------------------------------------------------
