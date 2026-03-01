@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import dynamic from "next/dynamic";
 import {
   Settings,
   BookOpen,
@@ -40,7 +41,7 @@ import {
   Unplug,
   Wifi,
   WifiOff,
-  Home,
+  Home as HomeIcon,
 } from "lucide-react";
 
 import {
@@ -73,6 +74,15 @@ import type {
   SearchResultEvent,
   KeypointResponse,
 } from "@/lib/types";
+
+const ArmSimulator = dynamic(() => import("@/components/ArmSimulator"), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-[350px] flex items-center justify-center bg-gray-900 rounded-lg">
+      <span className="text-gray-400 text-xs">Loading 3D model…</span>
+    </div>
+  ),
+});
 
 // ===========================================================================
 // Main App
@@ -1391,7 +1401,7 @@ function IKPage() {
                 disabled={sending}
                 className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-1.5"
               >
-                <Home size={12} /> Home
+                <HomeIcon size={12} /> Home
               </button>
               <button
                 onClick={handleSendToRobot}
@@ -1609,15 +1619,27 @@ function IKPage() {
         </div>
       )}
 
-      {/* Camera feed */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-gray-100">
-          <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-            <Camera size={16} className="text-teal-500" /> Robot Camera
-          </h3>
+      {/* Camera feed + 3D Simulator */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-gray-100">
+            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+              <Camera size={16} className="text-teal-500" /> Robot Camera
+            </h3>
+          </div>
+          <div className="p-4">
+            <CameraFeed />
+          </div>
         </div>
-        <div className="p-4">
-          <CameraFeed />
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-gray-100">
+            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+              <Move3d size={16} className="text-teal-500" /> 3D Simulator
+            </h3>
+          </div>
+          <div className="p-1">
+            <ArmSimulator joints={joints} className="w-full h-[350px] rounded-lg overflow-hidden" />
+          </div>
         </div>
       </div>
     </div>

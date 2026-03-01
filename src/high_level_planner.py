@@ -12,8 +12,12 @@ import argparse
 import base64
 import io
 import json
+import os
 import re
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from PIL import Image, ImageDraw, ImageOps
 from google import genai
@@ -63,7 +67,7 @@ def extract_keypoints(
     Returns a list of dicts: [{"point": [y, x], "label": str}]
     Coordinates are normalised to 0-1000.
     """
-    client = genai.Client()
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
     contents = []
     cam_idx = len(reference_images) + 1
@@ -144,7 +148,7 @@ def annotated_image_to_base64(image: Image.Image) -> str:
 
 def main():
     import matplotlib
-    matplotlib.use("QtAgg")
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     parser = argparse.ArgumentParser(
@@ -178,7 +182,7 @@ def main():
     print(f"querying {args.model} (thinking_budget={args.thinking_budget})...")
 
     # override thinking config for CLI (supports thinking_level)
-    client = genai.Client()
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
     cam_idx = len(ref_imgs) + 1
     contents = []
     for idx, img in enumerate(ref_imgs, start=1):
@@ -234,7 +238,13 @@ def main():
     ax.set_title(f"Prompt: {args.prompt} | {len(data)} point(s) detected")
     ax.axis("off")
     plt.tight_layout()
-    plt.show()
+    out_path = Path("keypoint_result.png")
+    fig.savefig(out_path, dpi=150)
+    print(f"  saved annotated image to {out_path}")
+    try:
+        plt.show()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

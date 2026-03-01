@@ -16,6 +16,8 @@ dependencies = [
     "Pillow>=10.0.0",
     "opencv-python>=4.13.0.92",
     "lerobot>=0.4.4",
-    "placo>=0.9.20",
-    "mujoco>=3.5.0",
+    "placo>=0.9.20; sys_platform != 'win32'",
+    "mujoco>=3.5.0; sys_platform != 'win32'",
+    "feetech-servo-sdk>=1.0.0",
+    "matplotlib>=3.10.8",
 ]
