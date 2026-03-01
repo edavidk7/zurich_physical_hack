@@ -73,16 +73,21 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    from src.constants import TOOL_OFFSET_EE_M, CAM_TILT_EE_DEG, P_TIP_CAM_M
+except ImportError:
+    from constants import TOOL_OFFSET_EE_M, CAM_TILT_EE_DEG, P_TIP_CAM_M
+
 
 # ---------------------------------------------------------------------------
-# SO-101 physical constants
+# SO-101 physical constants  (values come from src/constants.py)
 # ---------------------------------------------------------------------------
 
-#: Tool (probe) extends 54 mm along EE +X (red axis in kinematic diagram)
-TOOL_OFFSET_EE = np.array([0.054, 0.0, 0.0])
+#: Tool (probe) offset from the Fixed_Jaw EE frame origin (metres, EE frame)
+TOOL_OFFSET_EE: np.ndarray = np.array(TOOL_OFFSET_EE_M)
 
 
-def make_R_cam_ee(tilt_deg: float = -35.0) -> np.ndarray:
+def make_R_cam_ee(tilt_deg: float = CAM_TILT_EE_DEG) -> np.ndarray:
     """
     Build R_cam_ee for the SO-101 wrist camera.
 
@@ -105,12 +110,11 @@ def make_R_cam_ee(tilt_deg: float = -35.0) -> np.ndarray:
 
 
 #: Default camera-in-EE rotation for the SO-101 wrist camera
-R_CAM_EE_DEFAULT = make_R_cam_ee(-35.0)
+R_CAM_EE_DEFAULT: np.ndarray = make_R_cam_ee(CAM_TILT_EE_DEG)
 
-#: Fixed vector from camera origin to tooltip tip, expressed in camera frame.
-#: Constant because camera and tool are both rigidly attached to the EE.
-#: Measured value: [0.0, 0.020479, 0.124339] m
-P_TIP_CAM = np.array([0.0, 0.020479, 0.124339])
+#: Fixed vector from camera origin to tooltip, expressed in camera frame (metres).
+#: Constant because both camera and tool are rigidly attached to the EE.
+P_TIP_CAM: np.ndarray = np.array(P_TIP_CAM_M)
 
 # Pre-compute the fixed camera-in-EE transform from the known constants.
 # This never needs to be recomputed at runtime — just use T_CAM_EE directly.

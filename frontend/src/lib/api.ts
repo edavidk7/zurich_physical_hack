@@ -140,9 +140,9 @@ export interface EEPosition {
   x: number;
   y: number;
   z: number;
-  roll: number;
-  pitch: number;
-  yaw: number;
+  roll_deg: number;
+  pitch_deg: number;
+  yaw_deg: number;
 }
 
 export interface FKResult {
@@ -151,9 +151,8 @@ export interface FKResult {
 }
 
 export interface IKResult {
-  joints_deg: number[];
-  joints_rad: number[];
-  joint_names: string[];
+  joints_deg: Record<string, number>;
+  joints_list: number[];
   ee_position: EEPosition;
   error_mm: number;
   success: boolean;
@@ -193,6 +192,17 @@ export async function inverseKinematics(params: {
 
 export async function getHomePosition(): Promise<HomeResult> {
   return apiFetch<HomeResult>("/api/kinematics/home");
+}
+
+export interface TooltipProjection {
+  visible: boolean;
+  u_norm: number;   // horizontal position in image, 0 = left, 1 = right
+  v_norm: number;   // vertical position in image,   0 = top,  1 = bottom
+  error?: string;
+}
+
+export async function getTooltipProjection(): Promise<TooltipProjection> {
+  return apiFetch<TooltipProjection>("/api/camera/tooltip_projection");
 }
 
 // ---------------------------------------------------------------------------

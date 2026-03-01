@@ -4,6 +4,8 @@ DocOps — FastAPI Backend
 REST API that wraps the Gemini agent pipeline for the Next.js frontend.
 """
 
+import collections
+import io
 import json
 import asyncio
 import os
@@ -25,7 +27,8 @@ from src.high_level_planner import (
     annotated_image_to_base64,
     load_and_prep_image,
 )
-from src.kinematics import get_kinematics
+from src.constants import CAMERA_WIDTH, CAMERA_HEIGHT
+from src.ik_solver import SO101IKSolver
 from src.motor_control import get_motor_controller, find_robot_port
 
 # ---------------------------------------------------------------------------
@@ -50,6 +53,9 @@ _camera_lock = threading.Lock()
 _camera = None
 _latest_frame: bytes | None = None  # cached latest JPEG for snapshot
 
+# Rolling FPS tracker (last 60 frame timestamps)
+_frame_times: collections.deque = collections.deque(maxlen=60)
+
 CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", "1"))
 
 
@@ -58,20 +64,32 @@ def _get_camera():
     if _camera is None:
         with _camera_lock:
             if _camera is None:
-                cfg = CameraConfig(index=CAMERA_INDEX, width=640, height=480)
+                cfg = CameraConfig(index=CAMERA_INDEX, width=CAMERA_WIDTH, height=CAMERA_HEIGHT)
                 _camera = CameraCapture(cfg)
                 _camera.open()
     return _camera
 
 
 def _capture_frame() -> bytes:
-    """Thread-safe frame capture. Updates the cached latest frame."""
+    """Thread-safe frame capture. Updates the cached latest frame and FPS counter."""
     global _latest_frame
     cam = _get_camera()
     with _camera_lock:
         jpeg = cam.capture_jpeg()
     _latest_frame = jpeg
+    _frame_times.append(time.monotonic())
     return jpeg
+
+
+def _resize_jpeg(jpeg: bytes, width: int, height: int) -> bytes:
+    """Decode a JPEG, resize, and re-encode at lower quality for thumbnails."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    img = img.resize((width, height), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=70)
+    return buf.getvalue()
 
 
 def _close_camera():
@@ -111,6 +129,7 @@ app.add_middleware(
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_docs() -> list[dict]:
     """Return metadata for all parsed markdown docs."""
     docs = []
@@ -119,18 +138,21 @@ def _get_docs() -> list[dict]:
         size_kb = md.stat().st_size / 1024
         img_dir = PARSED_DIR / f"{name}_images"
         img_count = len(list(img_dir.glob("*.png"))) if img_dir.exists() else 0
-        docs.append({
-            "name": name,
-            "filename": md.name,
-            "size_kb": round(size_kb, 1),
-            "image_count": img_count,
-        })
+        docs.append(
+            {
+                "name": name,
+                "filename": md.name,
+                "size_kb": round(size_kb, 1),
+                "image_count": img_count,
+            }
+        )
     return docs
 
 
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
+
 
 class TaskRequest(BaseModel):
     task: str
@@ -159,6 +181,7 @@ class ExecuteResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Routes — Knowledge Base
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/documents")
 async def list_documents():
@@ -193,6 +216,7 @@ async def upload_document(file: UploadFile = File(...)):
 
     try:
         from src.parser import DocumentParser
+
         parser = DocumentParser()
         doc = parser.parse(upload_path)
         doc.save_json(PARSED_DIR)
@@ -238,6 +262,7 @@ async def get_document_content(doc_name: str):
 # ---------------------------------------------------------------------------
 # Routes — Pipeline Execution
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/execute")
 async def execute_task(req: TaskRequest):
@@ -304,11 +329,14 @@ async def execute_task_stream(req: TaskRequest):
             return
 
         doc_names = [md.stem.replace("_parsed", "") for md in docs]
-        yield send("stage", {
-            "stage": "init",
-            "message": f"Found {len(docs)} document(s) in knowledge base",
-            "documents": doc_names,
-        })
+        yield send(
+            "stage",
+            {
+                "stage": "init",
+                "message": f"Found {len(docs)} document(s) in knowledge base",
+                "documents": doc_names,
+            },
+        )
         await asyncio.sleep(0)
 
         # --- Search phase ---
@@ -318,81 +346,106 @@ async def execute_task_stream(req: TaskRequest):
 
         for i, md_file in enumerate(docs):
             doc_name = md_file.stem.replace("_parsed", "")
-            yield send("stage", {
-                "stage": "searching",
-                "message": f"Searching: {doc_name}",
-                "document": doc_name,
-                "progress": i / len(docs),
-            })
+            yield send(
+                "stage",
+                {
+                    "stage": "searching",
+                    "message": f"Searching: {doc_name}",
+                    "document": doc_name,
+                    "progress": i / len(docs),
+                },
+            )
             await asyncio.sleep(0)
 
             content = md_file.read_text(encoding="utf-8")
             try:
-                result = await asyncio.to_thread(
-                    searcher.search, req.task, content, doc_name
-                )
+                result = await asyncio.to_thread(searcher.search, req.task, content, doc_name)
                 relevant = result.get("relevant", False)
-                yield send("search_result", {
-                    "document": doc_name,
-                    "relevant": relevant,
-                    "task_understanding": result.get("task_understanding", ""),
-                })
+                yield send(
+                    "search_result",
+                    {
+                        "document": doc_name,
+                        "relevant": relevant,
+                        "task_understanding": result.get("task_understanding", ""),
+                    },
+                )
                 if relevant:
                     results.append(result)
             except Exception as e:
                 errors.append({"document": doc_name, "error": str(e)})
-                yield send("search_error", {
-                    "document": doc_name,
-                    "error": str(e),
-                })
+                yield send(
+                    "search_error",
+                    {
+                        "document": doc_name,
+                        "error": str(e),
+                    },
+                )
             await asyncio.sleep(0)
 
-        yield send("stage", {
-            "stage": "search_complete",
-            "message": f"Search complete — {len(results)} relevant document(s) found",
-            "relevant_count": len(results),
-            "total": len(docs),
-        })
+        yield send(
+            "stage",
+            {
+                "stage": "search_complete",
+                "message": f"Search complete — {len(results)} relevant document(s) found",
+                "relevant_count": len(results),
+                "total": len(docs),
+            },
+        )
         await asyncio.sleep(0)
 
         if not results:
-            yield send("done", {
-                "search_results": [],
-                "task_plan": None,
-                "errors": errors,
-                "message": "No relevant information found in any document.",
-            })
+            yield send(
+                "done",
+                {
+                    "search_results": [],
+                    "task_plan": None,
+                    "errors": errors,
+                    "message": "No relevant information found in any document.",
+                },
+            )
             return
 
         # --- Planning phase ---
-        yield send("stage", {
-            "stage": "planning",
-            "message": "Generating task execution plan…",
-        })
+        yield send(
+            "stage",
+            {
+                "stage": "planning",
+                "message": "Generating task execution plan…",
+            },
+        )
         await asyncio.sleep(0)
 
         planner = TaskPlanner()
         try:
             task_plan = await asyncio.to_thread(planner.plan, req.task, results)
         except Exception as e:
-            yield send("done", {
-                "search_results": results,
-                "task_plan": None,
-                "errors": [{"stage": "planning", "error": str(e)}],
-            })
+            yield send(
+                "done",
+                {
+                    "search_results": results,
+                    "task_plan": None,
+                    "errors": [{"stage": "planning", "error": str(e)}],
+                },
+            )
             return
 
-        yield send("stage", {
-            "stage": "complete",
-            "message": "Task plan generated successfully",
-        })
+        yield send(
+            "stage",
+            {
+                "stage": "complete",
+                "message": "Task plan generated successfully",
+            },
+        )
         await asyncio.sleep(0)
 
-        yield send("done", {
-            "search_results": results,
-            "task_plan": task_plan,
-            "errors": errors,
-        })
+        yield send(
+            "done",
+            {
+                "search_results": results,
+                "task_plan": task_plan,
+                "errors": errors,
+            },
+        )
 
     return StreamingResponse(
         event_stream(),
@@ -470,6 +523,7 @@ async def chat(req: ChatRequest):
 # Routes — Robot Execution
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/robot/execute")
 async def robot_execute(req: RobotExecuteRequest):
     """Send a task plan to the SO-ARM100 robot for execution.
@@ -484,11 +538,16 @@ async def robot_execute(req: RobotExecuteRequest):
 
     # Save the plan for the robot controller to pick up
     plan_path = PLANS_DIR / "latest_plan.json"
-    plan_path.write_text(json.dumps({
-        "plan": plan,
-        "feedback": req.feedback,
-        "status": "queued",
-    }, indent=2))
+    plan_path.write_text(
+        json.dumps(
+            {
+                "plan": plan,
+                "feedback": req.feedback,
+                "status": "queued",
+            },
+            indent=2,
+        )
+    )
 
     return {
         "status": "queued",
@@ -512,63 +571,184 @@ async def robot_status():
 # Routes — Kinematics (FK / IK)
 # ---------------------------------------------------------------------------
 
+_ik_solver: SO101IKSolver | None = None
+_ik_solver_lock = threading.Lock()
+
+
+def get_ik_solver() -> SO101IKSolver:
+    global _ik_solver
+    with _ik_solver_lock:
+        if _ik_solver is None:
+            _ik_solver = SO101IKSolver()
+        return _ik_solver
+
+
+_MOTOR_NAMES_ORDER = [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+]
+
+
 class FKRequest(BaseModel):
     joints_deg: list[float]  # 6 values: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
+
 
 class IKRequest(BaseModel):
     x: float
     y: float
     z: float
-    roll: Optional[float] = None   # degrees, optional
+    roll: Optional[float] = None  # degrees, optional
     pitch: Optional[float] = None
     yaw: Optional[float] = None
     init_joints_deg: Optional[list[float]] = None  # 6 values, optional initial guess
     gripper_deg: float = 0.0
 
+
 @app.post("/api/kinematics/fk")
 async def forward_kinematics(req: FKRequest):
     """Compute end-effector pose from joint angles (degrees)."""
     import numpy as np
-    kin = get_kinematics()
-    q_rad = np.deg2rad(req.joints_deg)
-    ee = kin.get_ee_position(q_rad)
-    violations = kin.check_joint_limits(q_rad)
+
+    solver = get_ik_solver()
+    q_deg = {name: float(deg) for name, deg in zip(_MOTOR_NAMES_ORDER, req.joints_deg)}
+    T = solver.fk(q_deg)
+    pos = T[:3, 3]
+    R = T[:3, :3]
+    # Extract RPY (ZYX convention) from rotation matrix
+    pitch = float(np.arcsin(-R[2, 0]))
+    cy = np.cos(pitch)
+    if abs(cy) > 1e-6:
+        roll = float(np.arctan2(R[2, 1] / cy, R[2, 2] / cy))
+        yaw = float(np.arctan2(R[1, 0] / cy, R[0, 0] / cy))
+    else:
+        roll = float(np.arctan2(-R[1, 2], R[1, 1]))
+        yaw = 0.0
+    # Check joint limits
+    from src.ik_solver import _LIMITS_DEG
+
+    violations = [name for name, deg in q_deg.items() if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]]
+    roll_d, pitch_d, yaw_d = float(np.rad2deg(roll)), float(np.rad2deg(pitch)), float(np.rad2deg(yaw))
+    print(
+        f"[FK] EE pos = ({pos[0] * 1000:.1f}, {pos[1] * 1000:.1f}, {pos[2] * 1000:.1f}) mm  "
+        f"RPY = ({roll_d:.1f}°, {pitch_d:.1f}°, {yaw_d:.1f}°)" + (f"  violations={violations}" if violations else "")
+    )
     return {
-        "ee_position": ee,
+        "ee_position": {
+            "x": float(pos[0]),
+            "y": float(pos[1]),
+            "z": float(pos[2]),
+            "roll_deg": roll_d,
+            "pitch_deg": pitch_d,
+            "yaw_deg": yaw_d,
+        },
         "joint_violations": violations,
     }
+
 
 @app.post("/api/kinematics/ik")
 async def inverse_kinematics(req: IKRequest):
     """Compute joint angles to reach a target end-effector position."""
     import numpy as np
-    kin = get_kinematics()
-    rpy = None
+
+    solver = get_ik_solver()
+
+    # Build initial guess: prefer live motor positions, fall back to request or zeros
+    mc = get_motor_controller()
+    if mc.is_connected:
+        live = mc.read_positions().get("positions_deg", {})
+        q_init = {n: float(live.get(n, 0.0)) for n in _MOTOR_NAMES_ORDER}
+    elif req.init_joints_deg and len(req.init_joints_deg) == 6:
+        q_init = {name: float(deg) for name, deg in zip(_MOTOR_NAMES_ORDER, req.init_joints_deg)}
+    else:
+        q_init = {n: 0.0 for n in _MOTOR_NAMES_ORDER}
+    q_init["gripper"] = req.gripper_deg
+
+    # Optional orientation target
+    target_R = None
     if req.roll is not None and req.pitch is not None and req.yaw is not None:
-        rpy = (req.roll, req.pitch, req.yaw)
-    init = np.deg2rad(req.init_joints_deg) if req.init_joints_deg else None
-    result = kin.inverse_kinematics(
-        target_xyz=(req.x, req.y, req.z),
-        target_rpy_deg=rpy,
-        q_init_mech=init,
-        gripper=np.deg2rad(req.gripper_deg),
+        r, p, y = np.deg2rad([req.roll, req.pitch, req.yaw])
+        cr, sr = np.cos(r), np.sin(r)
+        cp, sp = np.cos(p), np.sin(p)
+        cy, sy = np.cos(y), np.sin(y)
+        target_R = np.array(
+            [
+                [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                [-sp, cp * sr, cp * cr],
+            ]
+        )
+
+    target_pos = np.array([req.x, req.y, req.z])
+    q_result = solver.ik(q_init, target_pos, target_R=target_R)
+
+    # Compute achieved EE position and orientation via FK on the result
+    T_achieved = solver.fk(q_result)
+    pos = T_achieved[:3, 3]
+    R = T_achieved[:3, :3]
+    tip_achieved = pos + R @ solver.tool_offset
+    error_mm = float(np.linalg.norm(tip_achieved - target_pos) * 1000)
+
+    # Extract RPY (ZYX convention)
+    pitch_r = float(np.arcsin(-R[2, 0]))
+    cy_r = np.cos(pitch_r)
+    if abs(cy_r) > 1e-6:
+        roll_r = float(np.arctan2(R[2, 1] / cy_r, R[2, 2] / cy_r))
+        yaw_r = float(np.arctan2(R[1, 0] / cy_r, R[0, 0] / cy_r))
+    else:
+        roll_r = float(np.arctan2(-R[1, 2], R[1, 1]))
+        yaw_r = 0.0
+
+    from src.ik_solver import _LIMITS_DEG
+
+    violations = [name for name, deg in q_result.items() if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]]
+    joints_list = [q_result[n] for n in _MOTOR_NAMES_ORDER]
+    roll_d = float(np.rad2deg(roll_r))
+    pitch_d = float(np.rad2deg(pitch_r))
+    yaw_d = float(np.rad2deg(yaw_r))
+    print(
+        f"[IK] target=({req.x * 1000:.1f}, {req.y * 1000:.1f}, {req.z * 1000:.1f}) mm  "
+        f"achieved=({pos[0] * 1000:.1f}, {pos[1] * 1000:.1f}, {pos[2] * 1000:.1f}) mm  "
+        f"error={error_mm:.2f} mm  success={error_mm < 10.0}"
     )
-    violations = kin.check_joint_limits(np.array(result["joints_rad"]))
-    result["joint_violations"] = violations
-    return result
+    print("[IK] joints = " + "  ".join(f"{n[:4]}={v:.1f}°" for n, v in q_result.items()))
+    if violations:
+        print(f"[IK] LIMIT VIOLATIONS: {violations}")
+    return {
+        "joints_deg": q_result,
+        "joints_list": joints_list,
+        "ee_position": {
+            "x": float(pos[0]),
+            "y": float(pos[1]),
+            "z": float(pos[2]),
+            "roll_deg": roll_d,
+            "pitch_deg": pitch_d,
+            "yaw_deg": yaw_d,
+        },
+        "error_mm": error_mm,
+        "success": error_mm < 10.0,
+        "joint_violations": violations,
+    }
+
 
 @app.get("/api/kinematics/home")
 async def kinematics_home():
     """Return the home pose joint angles and corresponding EE position."""
-    import numpy as np
-    kin = get_kinematics()
-    q_home_deg = [0.0, -90.0, 90.0, 90.0, -90.0, 90.0]
-    q_home_rad = np.deg2rad(q_home_deg)
-    ee = kin.get_ee_position(q_home_rad)
+    solver = get_ik_solver()
+    q_home_deg = {n: 0.0 for n in _MOTOR_NAMES_ORDER}
+    T = solver.fk(q_home_deg)
+    pos = T[:3, 3]
     return {
         "joints_deg": q_home_deg,
-        "joint_names": kin.model.motor_names,
-        "ee_position": ee,
+        "joint_names": _MOTOR_NAMES_ORDER,
+        "ee_position": {
+            "x": float(pos[0]),
+            "y": float(pos[1]),
+            "z": float(pos[2]),
+        },
     }
 
 
@@ -576,15 +756,19 @@ async def kinematics_home():
 # Routes — Motor Control (direct servo control)
 # ---------------------------------------------------------------------------
 
+
 class MotorConnectRequest(BaseModel):
     port: Optional[str] = None  # auto-detect if None
+
 
 class MotorWriteRequest(BaseModel):
     joints_deg: list[float]  # 6 values: shoulder_pan → gripper
     speed: Optional[int] = None  # 0-1000 (0=slowest, 100=moderate, 1000=max)
 
+
 class MotorSpeedRequest(BaseModel):
     speed: int  # 0-1000
+
 
 @app.post("/api/motor/connect")
 async def motor_connect(req: MotorConnectRequest):
@@ -601,6 +785,7 @@ async def motor_connect(req: MotorConnectRequest):
         raise HTTPException(500, result.get("error", "Connection failed"))
     return result
 
+
 @app.post("/api/motor/disconnect")
 async def motor_disconnect():
     """Disconnect from the robot, disabling torque."""
@@ -608,6 +793,7 @@ async def motor_disconnect():
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, ctrl.disconnect)
     return result
+
 
 @app.get("/api/motor/status")
 async def motor_status():
@@ -625,6 +811,7 @@ async def motor_status():
         "error": result.get("error"),
     }
 
+
 @app.get("/api/motor/positions")
 async def motor_read_positions():
     """Read current joint positions from the robot."""
@@ -636,6 +823,7 @@ async def motor_read_positions():
     if "error" in result:
         raise HTTPException(500, result["error"])
     return result
+
 
 @app.post("/api/motor/move")
 async def motor_write_positions(req: MotorWriteRequest):
@@ -649,12 +837,11 @@ async def motor_write_positions(req: MotorWriteRequest):
     if not ctrl.is_connected:
         raise HTTPException(400, "Robot not connected. Call /api/motor/connect first.")
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None, ctrl.write_joint_array, req.joints_deg, req.speed
-    )
+    result = await loop.run_in_executor(None, ctrl.write_joint_array, req.joints_deg, req.speed)
     if "error" in result:
         raise HTTPException(500, result["error"])
     return result
+
 
 @app.post("/api/motor/torque/enable")
 async def motor_enable_torque():
@@ -666,6 +853,7 @@ async def motor_enable_torque():
     result = await loop.run_in_executor(None, ctrl.enable_torque)
     return result
 
+
 @app.post("/api/motor/speed")
 async def motor_set_speed(req: MotorSpeedRequest):
     """Set the movement speed (0=slowest, 100=moderate, 1000=max)."""
@@ -675,6 +863,7 @@ async def motor_set_speed(req: MotorSpeedRequest):
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, ctrl.set_speed, req.speed)
     return result
+
 
 @app.post("/api/motor/torque/disable")
 async def motor_disable_torque():
@@ -686,6 +875,7 @@ async def motor_disable_torque():
     result = await loop.run_in_executor(None, ctrl.disable_torque)
     return result
 
+
 @app.get("/api/motor/detect-port")
 async def motor_detect_port():
     """Auto-detect the robot serial port."""
@@ -696,6 +886,7 @@ async def motor_detect_port():
 # ---------------------------------------------------------------------------
 # Routes — Camera
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/camera/frame")
 async def camera_frame():
@@ -713,20 +904,25 @@ async def camera_frame():
 
 
 @app.get("/api/camera/stream")
-async def camera_stream():
-    """MJPEG stream from the robot camera for live feed."""
+async def camera_stream(w: int = 0, h: int = 0):
+    """MJPEG stream from the robot camera for live feed.
+
+    Optional query params:
+      w, h – downscale each frame to this resolution before streaming
+              (useful for thumbnail previews).  Omit for full resolution.
+    """
+
     async def generate():
         loop = asyncio.get_event_loop()
         while True:
             try:
                 jpeg = await loop.run_in_executor(None, _capture_frame)
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n"
-                    + jpeg
-                    + b"\r\n"
-                )
-                await asyncio.sleep(0.1)  # ~10 fps
+                if w > 0 and h > 0:
+                    jpeg = await loop.run_in_executor(None, _resize_jpeg, jpeg, w, h)
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
+                # Yield control so the event loop stays responsive;
+                # actual frame rate is limited by camera capture time.
+                await asyncio.sleep(0)
             except Exception:
                 break
 
@@ -737,9 +933,64 @@ async def camera_stream():
     )
 
 
+@app.get("/api/camera/fps")
+async def camera_fps():
+    """Return the rolling capture FPS (last 60 frames)."""
+    n = len(_frame_times)
+    if n < 2:
+        return {"fps": 0.0}
+    elapsed = _frame_times[-1] - _frame_times[0]
+    fps = (n - 1) / elapsed if elapsed > 0 else 0.0
+    return {"fps": round(fps, 1)}
+
+
+@app.get("/api/camera/tooltip_projection")
+async def tooltip_projection():
+    """
+    Project the tool tip into the camera image plane.
+
+    Uses the fixed camera-in-EE transform (T_CAM_EE) from robot_cam_calibration
+    and the camera intrinsics K from calibration.json to map the tool tip
+    (TOOL_OFFSET_EE_M in the Fixed_Jaw frame) to a normalized image coordinate.
+
+    The tip position in the camera frame is constant because both the camera and
+    the tool are rigidly attached to the EE — only the workspace view changes,
+    not where the tip appears in the image.
+
+    Returns {u_norm, v_norm, visible} where u_norm/v_norm ∈ [0,1].
+    """
+    import numpy as np
+    from src.localize_from_checkerboard import load_calibration, _CALIB_PATH
+    from src.constants import CAMERA_WIDTH, CAMERA_HEIGHT, P_TIP_CAM_M
+
+    if not _CALIB_PATH.exists():
+        return {"visible": False, "u_norm": 0.5, "v_norm": 0.5, "error": "calibration.json not found"}
+
+    K, _, _, _ = load_calibration()
+
+    # Tool tip in EE (Fixed_Jaw) frame → camera frame
+    x_c, y_c, z_c = list(P_TIP_CAM_M)
+
+    if z_c <= 0:
+        return {"visible": False, "u_norm": 0.5, "v_norm": 0.5}
+
+    u = K[0, 0] * x_c / z_c + K[0, 2]
+    v = K[1, 1] * y_c / z_c + K[1, 2]
+    u_norm = float(u) / CAMERA_WIDTH
+    v_norm = float(v) / CAMERA_HEIGHT
+    visible = bool(0.0 <= u_norm <= 1.0 and 0.0 <= v_norm <= 1.0)
+
+    print(
+        f"[tooltip_projection] tip_cam=({x_c * 1000:.1f}, {y_c * 1000:.1f}, {z_c * 1000:.1f}) mm  "
+        f"px=({u:.1f}, {v:.1f})  norm=({u_norm:.3f}, {v_norm:.3f})  visible={visible}"
+    )
+    return {"visible": visible, "u_norm": u_norm, "v_norm": v_norm}
+
+
 # ---------------------------------------------------------------------------
 # Routes — Keypoint localisation
 # ---------------------------------------------------------------------------
+
 
 class ReferenceImage(BaseModel):
     doc_name: str
@@ -767,10 +1018,7 @@ def _prompt_from_step(step: dict) -> str:
     probe_neg = params.get("probe_negative", "")
     targets = [p for p in [probe_pos, probe_neg] if p and isinstance(p, str)]
     if targets:
-        return (
-            f"Locate {' and '.join(targets)} on the board, "
-            "and the current tip position of the multimeter probe"
-        )
+        return f"Locate {' and '.join(targets)} on the board, and the current tip position of the multimeter probe"
     target = step.get("target") or step.get("description") or "the target component"
     return f"Locate {target} on the board and the current tip position of the multimeter probe"
 
@@ -806,7 +1054,12 @@ async def step_keypoints(req: StepKeypointRequest):
 
     try:
         keypoints = await asyncio.to_thread(
-            extract_keypoints, ref_pil, camera_pil, prompt, req.model, req.thinking_budget,
+            extract_keypoints,
+            ref_pil,
+            camera_pil,
+            prompt,
+            req.model,
+            req.thinking_budget,
         )
     except Exception as e:
         raise HTTPException(500, f"VLM error: {e}")
@@ -876,6 +1129,7 @@ async def locate_keypoints(req: KeypointRequest):
 # Health
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "documents": len(_get_docs())}
@@ -887,4 +1141,5 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

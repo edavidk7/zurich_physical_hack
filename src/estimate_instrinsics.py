@@ -9,7 +9,7 @@ matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 
 
-def calibrate_camera(image_dir, board_size, square_size, pixel_pitch, output_filename, visualize) -> dict[str, Any]:
+def calibrate_camera(image_dir, board_size, square_size, pixel_pitch, output_filename, visualize, intrinsic_guess: bool=False, guessed_intrinsics:dict | None = None) -> dict[str, Any]:
     """
     Calibrates a camera using checkerboard images from a directory.
 
@@ -64,7 +64,15 @@ def calibrate_camera(image_dir, board_size, square_size, pixel_pitch, output_fil
         raise Exception("No checkerboards found in the provided images.  Calibration cannot proceed.")
 
     # Calibrate the camera
-    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
+    if intrinsic_guess and guessed_intrinsics is not None:
+        # Create an initial camera matrix with the guessed intrinsics
+        print("Using guessed intrinsics as initial estimate for calibration:")
+        initial_camera_matrix = np.array([[guessed_intrinsics["fx"], 0, guessed_intrinsics["cx"]],
+                                          [0, guessed_intrinsics["fy"], guessed_intrinsics["cy"]],
+                                          [0, 0, 1]], dtype=np.float64)
+        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], initial_camera_matrix, None, flags=cv2.CALIB_USE_INTRINSIC_GUESS)
+    else:
+        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
 
     # Metric focal length
     f_mm = mtx[0, 0].item() * pixel_pitch / 1000
@@ -114,9 +122,29 @@ if __name__ == '__main__':
     parser.add_argument("--pixel_pitch", type=float, required=True)
     parser.add_argument("--vis", action="store_true", default=False)
     parser.add_argument("--output", type=str, default="calibration.json")
+    parser.add_argument("--intrinsic_guess", action="store_true", default=False, help="Whether to use guessed intrinsics as the initial estimate for calibration")
+    parser.add_argument("--fx_guess", type=float, default=0.0, help="Guessed focal length in pixels (fx) for intrinsic_guess"
+                        )
+    parser.add_argument("--fy_guess", type=float, default=0.0, help="Guessed focal length in pixels (fy) for intrinsic_guess"
+                        )
+    parser.add_argument("--cx_guess", type=float, default=0.0, help="Guessed principal point x-coordinate in pixels (cx) for intrinsic_guess"
+                        )
+    parser.add_argument("--cy_guess", type=float, default=0.0, help="Guessed principal point y-coordinate in pixels (cy) for intrinsic_guess"
+                        )
     args = parser.parse_args()
+    if args.intrinsic_guess:
+        if args.fx_guess <= 0 or args.fy_guess <= 0:
+            raise ValueError("Guessed focal lengths (fx_guess and fy_guess) must be positive when using intrinsic_guess.")
+        if args.cx_guess < 0 or args.cy_guess < 0:
+            raise ValueError("Guessed principal point coordinates (cx_guess and cy_guess) must be non-negative when using intrinsic_guess.")
+        guessed_intrinsics = {
+            "fx": args.fx_guess,
+            "fy": args.fy_guess,
+            "cx": args.cx_guess,
+            "cy": args.cy_guess
+        }
     try:
-        calib_data = calibrate_camera(args.src, args.board_size, args.square_size, args.pixel_pitch, visualize=args.vis, output_filename=args.output)
+        calib_data = calibrate_camera(args.src, args.board_size, args.square_size, args.pixel_pitch, visualize=args.vis, output_filename=args.output, guessed_intrinsics=guessed_intrinsics if args.intrinsic_guess else None, intrinsic_guess=args.intrinsic_guess)
         pprint.pprint(calib_data)
     except Exception as e:
         print(f"Error: {e}")

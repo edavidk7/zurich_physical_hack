@@ -87,28 +87,53 @@ class SO100MotorController:
                 self._bus = FeetechMotorsBus(
                     port=port, motors=motors, calibration=calibration
                 )
-                self._bus.connect(handshake=True)
+                # handshake=False skips the motor-ID bus scan, which reliably
+                # fails on macOS (USB-CDC driver timing / baud-rate quirks).
+                self._bus.connect(handshake=False)
 
-                # Configure for position mode
+                # Configure for position mode.
+                # STS3215 motors default to Status_Return_Level=1 (ACK reads only,
+                # not writes), so individual write() calls raise "no status packet"
+                # on macOS.  Use sync_write (broadcast, no ACK expected) instead,
+                # and make the whole block non-fatal — motors are pre-configured
+                # at the factory and work without explicit PID setup.
                 from lerobot.motors.feetech import OperatingMode
 
-                with self._bus.torque_disabled():
-                    self._bus.configure_motors()
-                    for motor in self._bus.motors:
-                        self._bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
-                        self._bus.write("P_Coefficient", motor, 16)
-                        self._bus.write("I_Coefficient", motor, 0)
-                        self._bus.write("D_Coefficient", motor, 32)
+                motor_names = list(motors.keys())
 
-                        if motor == "gripper":
-                            self._bus.write("Max_Torque_Limit", motor, 500)
-                            self._bus.write("Protection_Current", motor, 250)
-                            self._bus.write("Overload_Torque", motor, 25)
+                # Read present positions BEFORE touching any registers so we
+                # can immediately park Goal_Position there — the arm won't
+                # move when torque is (re-)enabled.
+                present: dict = {}
+                try:
+                    present = self._bus.sync_read("Present_Position")
+                    self._bus.sync_write("Goal_Position", present)
+                    logger.info(f"Parked Goal_Position at current pose: {present}")
+                except Exception as park_err:
+                    logger.warning(f"Could not read/park positions (non-fatal): {park_err}")
+
+                # Apply operating mode and PID config, then keep torque ON.
+                try:
+                    self._bus.sync_write("Operating_Mode", {m: OperatingMode.POSITION.value for m in motor_names})
+                    self._bus.sync_write("P_Coefficient",  {m: 16 for m in motor_names})
+                    self._bus.sync_write("I_Coefficient",  {m: 0  for m in motor_names})
+                    self._bus.sync_write("D_Coefficient",  {m: 32 for m in motor_names})
+                except Exception as cfg_err:
+                    logger.warning(f"Motor configuration skipped (non-fatal): {cfg_err}")
+
+                try:
+                    self._bus.sync_write("Torque_Enable", {m: 1 for m in motor_names})
+                except Exception as te_err:
+                    logger.warning(f"Torque enable skipped (non-fatal): {te_err}")
 
                 self._port = port
                 self._connected = True
                 logger.info(f"Connected to SO-ARM100 on {port}")
-                return {"status": "connected", "port": port}
+                return {
+                    "status": "connected",
+                    "port": port,
+                    "positions_deg": {k: float(v) for k, v in present.items()} if present else None,
+                }
 
             except Exception as e:
                 self._bus = None
@@ -122,7 +147,12 @@ class SO100MotorController:
             if not self._connected or self._bus is None:
                 return {"status": "not_connected"}
             try:
-                self._bus.disconnect(disable_torque=True)
+                # Disable torque via sync_write before closing (no ACK needed)
+                self._bus.sync_write("Torque_Enable", {m: 0 for m in MOTOR_NAMES})
+            except Exception as e:
+                logger.warning(f"Torque disable on disconnect failed (non-fatal): {e}")
+            try:
+                self._bus.disconnect(disable_torque=False)
             except Exception as e:
                 logger.warning(f"Error during disconnect: {e}")
             finally:
@@ -188,12 +218,18 @@ class SO100MotorController:
                 if not valid:
                     return {"error": "No valid motor names provided"}
 
-                # Ensure torque is enabled so the servos actually move
-                self._bus.enable_torque(list(valid.keys()))
+                # Ensure torque is enabled so the servos actually move.
+                # Use sync_write (no ACK) to avoid "no status packet" on macOS.
+                try:
+                    self._bus.sync_write("Torque_Enable", {m: 1 for m in valid})
+                except Exception as e:
+                    logger.warning(f"Torque enable skipped (non-fatal): {e}")
 
-                # Set speed before writing goal position
-                for motor in valid:
-                    self._bus.write("Goal_Velocity", motor, self._speed)
+                # Set speed via sync_write before writing goal position
+                try:
+                    self._bus.sync_write("Goal_Velocity", {m: self._speed for m in valid})
+                except Exception as e:
+                    logger.warning(f"Speed set skipped (non-fatal): {e}")
 
                 self._bus.sync_write("Goal_Position", valid)
                 logger.info(f"Wrote positions: {valid}")
@@ -225,7 +261,7 @@ class SO100MotorController:
             if not self.is_connected:
                 return {"error": "Not connected to robot"}
             try:
-                self._bus.enable_torque()
+                self._bus.sync_write("Torque_Enable", {m: 1 for m in MOTOR_NAMES})
                 return {"status": "torque_enabled"}
             except Exception as e:
                 return {"error": str(e)}
@@ -236,7 +272,7 @@ class SO100MotorController:
             if not self.is_connected:
                 return {"error": "Not connected to robot"}
             try:
-                self._bus.disable_torque()
+                self._bus.sync_write("Torque_Enable", {m: 0 for m in MOTOR_NAMES})
                 return {"status": "torque_disabled"}
             except Exception as e:
                 return {"error": str(e)}
@@ -270,22 +306,43 @@ def get_motor_controller() -> SO100MotorController:
 
 
 def find_robot_port() -> str | None:
-    """Auto-detect the robot's serial port (looks for CH343/CH340 USB serial)."""
+    """Auto-detect the robot's serial port (looks for CH343/CH340 USB serial).
+
+    On macOS the WCH CH343/CH340 chip often enumerates via the built-in
+    CDC-ACM driver and shows up as /dev/cu.usbmodem* with no "CH340" string
+    in the description.  We therefore also match by WCH VID (0x1A86) and by
+    the usbmodem device-name pattern.
+    """
+    import platform
     try:
         import serial.tools.list_ports
 
+        candidates = []
         for p in serial.tools.list_ports.comports():
             desc = (p.description or "").upper()
             hwid = (p.hwid or "").upper()
+            device = p.device or ""
+
             # Skip Bluetooth ports
             if "BLUETOOTH" in desc or "BTHENUM" in hwid:
                 continue
-            # Match CH343/CH340 USB-to-serial adapters used by SO-ARM100
+
+            # Explicit CH343/CH340 description match (Linux / Windows)
             if "CH343" in desc or "CH340" in desc or "CH343" in hwid or "CH340" in hwid:
-                return p.device
-            # Also match by USB VID:PID for WCH (1A86)
+                return device
+
+            # WCH USB VID (0x1A86) — covers macOS usbmodem enumeration
             if "VID:PID=1A86" in hwid or "VID_1A86" in hwid:
-                return p.device
+                return device
+
+            # macOS fallback: collect /dev/cu.usbmodem* ports (non-Bluetooth)
+            if platform.system() == "Darwin" and "usbmodem" in device.lower():
+                candidates.append(device)
+
+        # Return the first usbmodem candidate if nothing better was found
+        if candidates:
+            return candidates[0]
+
     except Exception:
         pass
     return None

@@ -65,6 +65,11 @@ from typing import NamedTuple
 import cv2
 import numpy as np
 
+try:
+    from src.constants import BOARD_ROWS, BOARD_COLS, WORKSPACE_PLANE_OFFSET_M
+except ImportError:
+    from constants import BOARD_ROWS, BOARD_COLS, WORKSPACE_PLANE_OFFSET_M
+
 # ---------------------------------------------------------------------------
 # Calibration
 # ---------------------------------------------------------------------------
@@ -81,8 +86,8 @@ def load_calibration(
     K    = np.array(cal["camera_matrix"], dtype=np.float64)
     dist = np.array(cal["dist_coeff"],    dtype=np.float64)
     sq_m = cal["square_size_mm"] / 1000.0
-    rows = int(cal.get("board_rows", 6))
-    cols = int(cal.get("board_cols", 9))
+    rows = int(cal.get("board_rows", BOARD_ROWS))
+    cols = int(cal.get("board_cols", BOARD_COLS))
     return K, dist, sq_m, (rows, cols)
 
 
@@ -153,7 +158,7 @@ def _try_detect(gray: np.ndarray, r: int, c: int):
 
 def detect_board_corners(
     image_bgr: np.ndarray,
-    board_shape: tuple[int, int] = (6, 9),
+    board_shape: tuple[int, int] = (BOARD_ROWS, BOARD_COLS),
     square_idx: tuple[int, int] | None = None,
     visualize: bool = False,
 ) -> list[tuple[float, float]]:
@@ -422,7 +427,7 @@ def localize_keypoint(
     image_path: str | Path,
     keypoint_px: tuple[float, float],
     square_corners_px: list[tuple[float, float]] | None = None,
-    plane_offset_m: float = 0.003,
+    plane_offset_m: float = WORKSPACE_PLANE_OFFSET_M,
     calib_path: str | Path = _CALIB_PATH,
     interactive: bool = False,
     auto_detect: bool = False,
@@ -532,9 +537,9 @@ if __name__ == "__main__":
                          "(only used with --auto)")
     ap.add_argument("--interactive",  action="store_true",
                     help="Open window to click the 4 corners manually")
-    ap.add_argument("--plane-offset", type=float, default=0.003,
+    ap.add_argument("--plane-offset", type=float, default=WORKSPACE_PLANE_OFFSET_M,
                     metavar="M",
-                    help="Target plane height above checkerboard (metres)  [default: 0.003]")
+                    help=f"Target plane height above checkerboard (metres)  [default: {WORKSPACE_PLANE_OFFSET_M}]")
     ap.add_argument("--calib",        default=str(_CALIB_PATH),
                     help="Path to calibration.json")
     ap.add_argument("--save",         default=None,
