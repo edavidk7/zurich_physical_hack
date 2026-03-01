@@ -1012,6 +1012,8 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
   // Closed-loop state
   const [loopRunning, setLoopRunning] = useState(false);
   const [loopDryRun, setLoopDryRun] = useState(false);
+  const [loopMaxRetries, setLoopMaxRetries] = useState(3);
+  const [loopAlignConfirmIters, setLoopAlignConfirmIters] = useState(2);
   const [loopLog, setLoopLog] = useState<ClosedLoopIteration[]>([]);
   const [loopDone, setLoopDone] = useState<{ success: boolean; message: string } | null>(null);
   const [loopError, setLoopError] = useState("");
@@ -1066,7 +1068,11 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
       await runClosedLoop(
         p,
         referenceImages,
-        { dryRun: loopDryRun },
+        {
+          dryRun: loopDryRun,
+          maxRetries: loopMaxRetries,
+          alignConfirmIters: loopAlignConfirmIters,
+        },
         {
           onIteration: (data) => {
             setLoopLog((prev) => [...prev, data]);
@@ -1133,6 +1139,34 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               className="rounded"
             />
             Dry run (no robot)
+          </label>
+
+          {/* max retries */}
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 select-none">
+            Max retries
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={loopMaxRetries}
+              onChange={(e) => setLoopMaxRetries(Math.max(1, parseInt(e.target.value) || 1))}
+              disabled={loopRunning}
+              className="w-14 border border-gray-200 rounded px-1.5 py-0.5 text-xs text-center focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:opacity-50"
+            />
+          </label>
+
+          {/* align confirm iters */}
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 select-none">
+            Align confirm iters
+            <input
+              type="number"
+              min={0}
+              max={10}
+              value={loopAlignConfirmIters}
+              onChange={(e) => setLoopAlignConfirmIters(Math.max(0, parseInt(e.target.value) || 0))}
+              disabled={loopRunning}
+              className="w-14 border border-gray-200 rounded px-1.5 py-0.5 text-xs text-center focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:opacity-50"
+            />
           </label>
 
           {referenceImages.length > 0 && (
@@ -1230,26 +1264,58 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               <div
                 key={i}
                 className={`rounded-xl border p-3 space-y-2 ${
-                  iter.action === "place"
+                  iter.phase === "verify"
+                    ? iter.confidence && iter.confidence >= 0.9
+                      ? "border-green-200 bg-green-50"
+                      : "border-amber-200 bg-amber-50"
+                    : iter.phase === "descend"
+                    ? "border-blue-200 bg-blue-50"
+                    : iter.phase === "retract"
+                    ? "border-red-200 bg-red-50"
+                    : iter.action === "place"
                     ? "border-green-200 bg-green-50"
                     : "border-gray-200 bg-gray-50"
                 }`}
               >
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-mono text-gray-400">#{iter.iteration}</span>
+                  {iter.phase && (
+                    <span
+                      className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                        iter.phase === "align"
+                          ? "bg-gray-200 text-gray-600"
+                          : iter.phase === "descend"
+                          ? "bg-blue-100 text-blue-700"
+                          : iter.phase === "verify"
+                          ? "bg-amber-100 text-amber-700"
+                          : "bg-red-100 text-red-700"
+                      }`}
+                    >
+                      {iter.phase}
+                    </span>
+                  )}
                   <span
                     className={`text-xs font-bold uppercase px-2 py-0.5 rounded-full ${
                       iter.action === "place"
                         ? "bg-green-600 text-white"
+                        : iter.action === "verify"
+                        ? "bg-amber-600 text-white"
+                        : iter.action === "descend"
+                        ? "bg-blue-600 text-white"
+                        : iter.action === "retract"
+                        ? "bg-red-600 text-white"
                         : "bg-indigo-100 text-indigo-700"
                     }`}
                   >
                     {iter.action}
                   </span>
-                  {iter.action === "place" && iter.confidence !== undefined && (
-                    <span className="text-xs text-green-700 font-medium">
+                  {(iter.action === "place" || iter.action === "verify") && iter.confidence !== undefined && (
+                    <span className={`text-xs font-medium ${iter.action === "verify" ? "text-amber-700" : "text-green-700"}`}>
                       conf {(iter.confidence * 100).toFixed(0)}%
                     </span>
+                  )}
+                  {iter.attempt !== undefined && (
+                    <span className="text-xs text-gray-400 font-mono">attempt {iter.attempt}</span>
                   )}
                   {!iter.pose_available && (
                     <span className="text-xs text-amber-600">no pose</span>
@@ -1261,11 +1327,14 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
                   )}
                 </div>
 
-                {iter.action === "look" && iter.reason && (
+                {iter.reason && (
                   <p className="text-xs text-gray-500 italic">{iter.reason}</p>
                 )}
                 {iter.action === "place" && iter.label && (
                   <p className="text-xs text-green-700 font-medium">{iter.label}</p>
+                )}
+                {iter.action === "descend" && iter.label && (
+                  <p className="text-xs text-blue-700 font-medium">{iter.label}</p>
                 )}
 
                 {/* eslint-disable-next-line @next/next/no-img-element */}

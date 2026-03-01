@@ -7,7 +7,7 @@ FRONTEND_DIR="$SCRIPT_DIR/frontend"
 # Install frontend deps if needed
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
     echo "node_modules not found, running npm install..."
-    npm --prefix "$FRONTEND_DIR" install
+    (cd "$FRONTEND_DIR" && npm install)
 fi
 
 # Kill both processes on exit
@@ -26,7 +26,7 @@ uv run python server.py &
 BACKEND_PID=$!
 
 echo "Starting frontend (port 3000)..."
-npm --prefix "$FRONTEND_DIR" run dev &
+(cd "$FRONTEND_DIR" && npm run dev) &
 FRONTEND_PID=$!
 
 echo ""

@@ -327,7 +327,8 @@ export async function executeStepKeypoints(
 
 export interface ClosedLoopIteration {
   iteration: number;
-  action: "look" | "place";
+  phase: "align" | "descend" | "verify" | "retract";
+  action: "look" | "place" | "descend" | "verify" | "retract";
   point: [number, number];
   annotated_image: string;
   pose_available: boolean;
@@ -335,6 +336,7 @@ export interface ClosedLoopIteration {
   reason?: string;
   label?: string;
   confidence?: number;
+  attempt?: number;
 }
 
 export interface ClosedLoopDone {
@@ -359,6 +361,8 @@ export async function runClosedLoop(
     zOffsetMm?: number;
     dryRun?: boolean;
     mockImage?: string;  // server-side path to a saved image; skips live camera
+    maxRetries?: number;
+    alignConfirmIters?: number;
   },
   callbacks: ClosedLoopCallbacks,
 ): Promise<void> {
@@ -375,6 +379,8 @@ export async function runClosedLoop(
       z_offset_mm: options.zOffsetMm ?? 2.5,
       dry_run: options.dryRun ?? false,
       mock_image: options.mockImage ?? null,
+      max_retries: options.maxRetries ?? 3,
+      align_confirm_iters: options.alignConfirmIters ?? 2,
     }),
   });
 

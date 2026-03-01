@@ -173,7 +173,27 @@ Do NOT return a list — return a single JSON object.
 """
 
 
+VERIFY_SCHEMA = """
+You are verifying whether a robotic probe successfully reached its target.
+
+Look at the camera image. The probe tip should be touching or very close to
+the target component.
+
+Return a JSON object:
+{"success": true, "confidence": <0.0-1.0>, "message": "<short explanation>"}
+  — if the probe appears to be on or very close to the target.
+
+{"success": false, "confidence": <0.0-1.0>, "message": "<what went wrong>",
+ "point": [y, x]}
+  — if the probe missed. "point" is where the target actually is in the
+    current image (normalised 0-1000, height-first) so the system can retry.
+
+Do NOT return a list — return a single JSON object.
+"""
+
+
 _mock_extract_action_call_count: int = 0
+_mock_verify_call_count: int = 0
 
 
 def extract_action(
@@ -230,7 +250,7 @@ def extract_action(
         model=model,
         contents=contents,
         config=types.GenerateContentConfig(
-            temperature=1.0,
+            temperature=0.2,
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True,
                 thinking_budget=thinking_budget,
@@ -247,6 +267,71 @@ def extract_action(
         raise ValueError(f"Unexpected response format: {raw}")
     if result["action"] not in ("look", "place"):
         raise ValueError(f"Unknown action '{result['action']}': {raw}")
+
+    return result
+
+
+def verify_placement(
+    reference_images: list[Image.Image],
+    camera_image: Image.Image,
+    prompt: str,
+    model: str = "gemini-2.5-flash",
+    thinking_budget: int = 1024,
+) -> dict:
+    """
+    Ask the VLM whether the probe is on-target after descent.
+
+    Returns:
+        {"success": True/False, "confidence": float, "message": str,
+         "point": [y, x] (only if success=False)}
+    """
+    import os
+
+    global _mock_verify_call_count
+    if os.environ.get("MOCK_VLM") == "1":
+        _mock_verify_call_count += 1
+        return {
+            "success": True,
+            "confidence": 0.95,
+            "message": "mock: probe is on target",
+        }
+
+    client = genai.Client()
+
+    cam_idx = len(reference_images) + 1
+    contents = []
+
+    for idx, img in enumerate(reference_images, start=1):
+        contents.append(f"Image {idx} (reference schematic/documentation):")
+        contents.append(img)
+
+    contents.append(f"Image {cam_idx} (live camera feed — verify placement HERE):")
+    contents.append(camera_image)
+    contents.append(
+        f"The robot just attempted to place its probe on: {prompt}.\n"
+        "The preceding images are reference schematics for context only.\n"
+        "Examine the live camera feed and determine if the probe tip is\n"
+        "touching or very close to the correct target.\n" + VERIFY_SCHEMA
+    )
+
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            temperature=0.2,
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=thinking_budget,
+            ),
+        ),
+    )
+
+    raw = response.text.strip()
+    cleaned = re.sub(r"^```\w*\n?|```$", "", raw).strip()
+    result = json.loads(cleaned)
+
+    if not isinstance(result, dict) or "success" not in result:
+        raise ValueError(f"Unexpected verify response format: {raw}")
 
     return result
 

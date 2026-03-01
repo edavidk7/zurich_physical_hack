@@ -1165,6 +1165,8 @@ class ClosedLoopRequest(BaseModel):
     mock_image: str | None = (
         None  # path to a saved image; skips live camera capture when set
     )
+    max_retries: int = 3  # how many descend-verify-retract cycles before giving up
+    align_confirm_iters: int = 2  # extra "look" iters after first "place" to refine XY
 
 
 @app.post("/api/robot/closed-loop")
@@ -1172,11 +1174,20 @@ async def closed_loop(req: ClosedLoopRequest):
     """
     SSE endpoint: run the closed-loop keypoint placement loop.
 
+    The loop has phases:
+      ALIGN   — "look" iterations to centre the target in frame
+      DESCEND — lateral correction + lower the probe onto the target
+      VERIFY  — capture a frame with the probe down, ask VLM if on-target
+      RETRACT — if verify fails, raise the probe back up and re-enter ALIGN
+
     Streams one JSON event per iteration:
       event: iteration
-      data: {"iteration": N, "action": "look"|"place", "point": [y,x],
+      data: {"iteration": N, "phase": "align"|"descend"|"verify"|"retract",
+              "action": "look"|"place"|"verify"|"retract",
+              "point": [y,x],
               "reason"?: str, "label"?: str, "confidence"?: float,
-              "annotated_image": "<base64 png>", "pose_available": bool}
+              "annotated_image": "<base64 png>", "pose_available": bool,
+              "cam_height_mm": float|null, "attempt"?: int}
 
     Final event:
       event: done
@@ -1189,6 +1200,7 @@ async def closed_loop(req: ClosedLoopRequest):
 
     # Lazy imports to avoid loading these at startup
     from src.pose_estimation import estimate_camera_pose, compute_movement_to_keypoint
+    from src.high_level_planner import verify_placement
 
     async def event_stream():
         def send(event: str, data: dict) -> str:
@@ -1256,20 +1268,75 @@ async def closed_loop(req: ClosedLoopRequest):
         def cam_delta_to_robot(dx_cam_mm, dy_cam_mm, dz_mm=0.0):
             return np.array([dy_cam_mm / 1000.0, -dx_cam_mm / 1000.0, -dz_mm / 1000.0])
 
+        # ── helpers ─────────────────────────────────────────────────────────
+
+        async def capture_frame():
+            """Capture a camera frame, return (pil, bgr) or raise."""
+            if req.mock_image:
+                pil = Image.open(req.mock_image).convert("RGB")
+            else:
+                cam = _get_camera()
+                loop = asyncio.get_event_loop()
+                jpeg_bytes = await loop.run_in_executor(None, cam.capture_jpeg)
+                pil = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+            bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+            return pil, bgr
+
+        async def get_pose(bgr):
+            """Estimate camera pose. Returns (ok, rvec, tvec, K, D, height_mm)."""
+            try:
+                success, rvec, tvec, K, D = await asyncio.to_thread(
+                    estimate_camera_pose, bgr, req.calib
+                )
+                if success:
+                    return True, rvec, tvec, K, D, float(tvec.flatten()[2])
+            except Exception:
+                pass
+            return False, None, None, None, None, None
+
+        async def do_lateral_move(norm_y, norm_x, rvec, tvec, K, D, img_w, img_h):
+            """Compute and execute a lateral-only move. Returns updated q."""
+            nonlocal q
+            delta_cam = await asyncio.to_thread(
+                compute_movement_to_keypoint,
+                norm_y,
+                norm_x,
+                rvec,
+                tvec,
+                K,
+                D,
+                img_w,
+                img_h,
+            )
+            delta_robot = cam_delta_to_robot(delta_cam[0], delta_cam[1], 0.0)
+            dist_m = float(np.linalg.norm(delta_robot[:2]))
+
+            if dist_m < 0.001:
+                return  # already centred
+
+            if not req.dry_run:
+                if q is None:
+                    obs = await asyncio.to_thread(robot.get_observation)
+                    q = obs_to_q(obs)
+                n_steps = max(N_STEPS, int(dist_m / 0.0025))
+                q = await asyncio.to_thread(
+                    cartesian_move, robot, q, delta_robot, n_steps
+                )
+                await asyncio.sleep(0.5)
+
+        # ── state machine ───────────────────────────────────────────────────
+        iteration = 0
+        attempt = 0  # descend-verify attempt counter
+        last_descend_height_mm = None  # remember how far we lowered for retract
+
         try:
-            for iteration in range(1, req.max_iterations + 1):
+            while iteration < req.max_iterations:
+                iteration += 1
                 await asyncio.sleep(0)  # yield to event loop
 
-                # ── capture frame ───────────────────────────────────────────
+                # ── ALIGN phase: capture → VLM → move laterally ─────────────
                 try:
-                    if req.mock_image:
-                        camera_pil = Image.open(req.mock_image).convert("RGB")
-                    else:
-                        cam = _get_camera()
-                        loop = asyncio.get_event_loop()
-                        jpeg_bytes = await loop.run_in_executor(None, cam.capture_jpeg)
-                        camera_pil = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
-                    bgr = cv2.cvtColor(np.array(camera_pil), cv2.COLOR_RGB2BGR)
+                    camera_pil, bgr = await capture_frame()
                 except Exception as e:
                     yield send(
                         "done", {"success": False, "message": f"Camera error: {e}"}
@@ -1277,20 +1344,7 @@ async def closed_loop(req: ClosedLoopRequest):
                     return
 
                 img_h, img_w = bgr.shape[:2]
-
-                # ── pose estimation ─────────────────────────────────────────
-                pose_available = False
-                rvec = tvec = K = D = None
-                cam_height_mm = None
-                try:
-                    success, rvec, tvec, K, D = await asyncio.to_thread(
-                        estimate_camera_pose, bgr, req.calib
-                    )
-                    if success:
-                        pose_available = True
-                        cam_height_mm = float(tvec.flatten()[2])
-                except Exception:
-                    pass
+                pose_available, rvec, tvec, K, D, cam_height_mm = await get_pose(bgr)
 
                 # ── VLM decision ────────────────────────────────────────────
                 try:
@@ -1310,10 +1364,8 @@ async def closed_loop(req: ClosedLoopRequest):
                     }
 
                 action = decision["action"]
-                norm_y, norm_x = (
-                    float(decision["point"][0]),
-                    float(decision["point"][1]),
-                )
+                norm_y = float(decision["point"][0])
+                norm_x = float(decision["point"][1])
                 conf = float(decision.get("confidence", 0.0))
 
                 # demote low-confidence place → look
@@ -1325,7 +1377,7 @@ async def closed_loop(req: ClosedLoopRequest):
                     }
                     action = "look"
 
-                # annotated frame for the UI
+                # annotated frame
                 ann_kp = [
                     {"point": [norm_y, norm_x], "label": f"{action} (iter {iteration})"}
                 ]
@@ -1334,6 +1386,7 @@ async def closed_loop(req: ClosedLoopRequest):
 
                 event_data: dict = {
                     "iteration": iteration,
+                    "phase": "align",
                     "action": action,
                     "point": [norm_y, norm_x],
                     "annotated_image": img_b64,
@@ -1349,101 +1402,282 @@ async def closed_loop(req: ClosedLoopRequest):
                 yield send("iteration", event_data)
                 await asyncio.sleep(0)
 
-                # ── execute action ──────────────────────────────────────────
+                # ── execute ALIGN action ────────────────────────────────────
                 if action == "look":
                     if not pose_available:
-                        continue  # can't move without pose; just re-query
-                    delta_cam = await asyncio.to_thread(
-                        compute_movement_to_keypoint,
-                        norm_y,
-                        norm_x,
-                        rvec,
-                        tvec,
-                        K,
-                        D,
-                        img_w,
-                        img_h,
+                        continue
+                    await do_lateral_move(
+                        norm_y, norm_x, rvec, tvec, K, D, img_w, img_h
                     )
-                    delta_robot = cam_delta_to_robot(delta_cam[0], delta_cam[1], 0.0)
-                    dist_m = float(np.linalg.norm(delta_robot[:2]))
+                    continue
 
-                    if dist_m < 0.001:
-                        continue  # already centred
+                # ── action == "place": enter refinement + descend ───────────
+                if not pose_available:
+                    yield send(
+                        "done",
+                        {
+                            "success": False,
+                            "message": "Place requested but no pose available.",
+                        },
+                    )
+                    return
 
-                    if not req.dry_run:
-                        nonlocal_q = q
-                        if nonlocal_q is None:
-                            obs = await asyncio.to_thread(robot.get_observation)
-                            nonlocal_q = obs_to_q(obs)
-                        n_steps = max(N_STEPS, int(dist_m / 0.0025))
-                        nonlocal_q = await asyncio.to_thread(
-                            cartesian_move, robot, nonlocal_q, delta_robot, n_steps
-                        )
-                        q = nonlocal_q
-                        await asyncio.sleep(0.5)
+                # Do the lateral correction from the place decision
+                await do_lateral_move(norm_y, norm_x, rvec, tvec, K, D, img_w, img_h)
 
-                elif action == "place":
-                    if not pose_available:
+                # Extra alignment iterations: re-capture, re-query, refine XY
+                for confirm_i in range(req.align_confirm_iters):
+                    iteration += 1
+                    if iteration > req.max_iterations:
+                        break
+                    await asyncio.sleep(0)
+
+                    try:
+                        camera_pil, bgr = await capture_frame()
+                    except Exception as e:
                         yield send(
-                            "done",
-                            {
-                                "success": False,
-                                "message": "Place requested but no pose available.",
-                            },
+                            "done", {"success": False, "message": f"Camera error: {e}"}
                         )
                         return
 
-                    delta_cam = await asyncio.to_thread(
-                        compute_movement_to_keypoint,
-                        norm_y,
-                        norm_x,
-                        rvec,
-                        tvec,
-                        K,
-                        D,
-                        img_w,
-                        img_h,
+                    img_h, img_w = bgr.shape[:2]
+                    pose_available, rvec, tvec, K, D, cam_height_mm = await get_pose(
+                        bgr
                     )
-                    lateral = cam_delta_to_robot(delta_cam[0], delta_cam[1], 0.0)
-                    dz_cam_mm = cam_height_mm - req.z_offset_mm
-                    z_delta = cam_delta_to_robot(0.0, 0.0, dz_cam_mm)
 
-                    if abs(z_delta[2]) > MAX_LOWER_M:
-                        yield send(
-                            "done",
-                            {
-                                "success": False,
-                                "message": f"Z delta {z_delta[2] * 100:.1f} cm exceeds safety limit.",
-                            },
+                    try:
+                        confirm_decision = await asyncio.to_thread(
+                            extract_action,
+                            ref_pil,
+                            camera_pil,
+                            req.prompt,
+                            req.model,
+                            req.thinking_budget,
                         )
-                        return
+                    except Exception as e:
+                        confirm_decision = {
+                            "action": "look",
+                            "point": [500, 500],
+                            "reason": f"VLM error during confirm: {e}",
+                        }
 
-                    if not req.dry_run:
-                        nonlocal_q = q
-                        if nonlocal_q is None:
-                            obs = await asyncio.to_thread(robot.get_observation)
-                            nonlocal_q = obs_to_q(obs)
-                        dist_m = float(np.linalg.norm(lateral[:2]))
-                        if dist_m > 0.001:
-                            n_lat = max(N_STEPS, int(dist_m / 0.0025))
-                            nonlocal_q = await asyncio.to_thread(
-                                cartesian_move, robot, nonlocal_q, lateral, n_lat
-                            )
-                            await asyncio.sleep(0.5)
-                        n_z = max(N_STEPS, int(abs(z_delta[2]) / 0.0025))
-                        nonlocal_q = await asyncio.to_thread(
-                            cartesian_move, robot, nonlocal_q, z_delta, n_z
+                    c_action = confirm_decision["action"]
+                    c_norm_y = float(confirm_decision["point"][0])
+                    c_norm_x = float(confirm_decision["point"][1])
+
+                    ann_kp = [
+                        {
+                            "point": [c_norm_y, c_norm_x],
+                            "label": f"confirm {confirm_i + 1} (iter {iteration})",
+                        }
+                    ]
+                    annotated = annotate_image_pil(camera_pil, ann_kp)
+                    img_b64 = annotated_image_to_base64(annotated)
+
+                    yield send(
+                        "iteration",
+                        {
+                            "iteration": iteration,
+                            "phase": "align",
+                            "action": c_action,
+                            "point": [c_norm_y, c_norm_x],
+                            "annotated_image": img_b64,
+                            "pose_available": pose_available,
+                            "cam_height_mm": cam_height_mm,
+                            "reason": confirm_decision.get(
+                                "reason",
+                                f"Refining alignment ({confirm_i + 1}/{req.align_confirm_iters})",
+                            ),
+                        },
+                    )
+                    await asyncio.sleep(0)
+
+                    if pose_available:
+                        await do_lateral_move(
+                            c_norm_y, c_norm_x, rvec, tvec, K, D, img_w, img_h
                         )
-                        q = nonlocal_q
 
+                # ── DESCEND phase ───────────────────────────────────────────
+                # Re-capture for fresh pose to compute Z
+                try:
+                    camera_pil, bgr = await capture_frame()
+                except Exception as e:
+                    yield send(
+                        "done", {"success": False, "message": f"Camera error: {e}"}
+                    )
+                    return
+
+                img_h, img_w = bgr.shape[:2]
+                pose_available, rvec, tvec, K, D, cam_height_mm = await get_pose(bgr)
+
+                if not pose_available or cam_height_mm is None:
+                    yield send(
+                        "done",
+                        {
+                            "success": False,
+                            "message": "Cannot descend: no pose available for height estimate.",
+                        },
+                    )
+                    return
+
+                dz_cam_mm = cam_height_mm - req.z_offset_mm
+                z_delta = cam_delta_to_robot(0.0, 0.0, dz_cam_mm)
+
+                if abs(z_delta[2]) > MAX_LOWER_M:
+                    yield send(
+                        "done",
+                        {
+                            "success": False,
+                            "message": f"Z delta {z_delta[2] * 100:.1f} cm exceeds safety limit.",
+                        },
+                    )
+                    return
+
+                iteration += 1
+
+                yield send(
+                    "iteration",
+                    {
+                        "iteration": iteration,
+                        "phase": "descend",
+                        "action": "descend",
+                        "point": [norm_y, norm_x],
+                        "annotated_image": img_b64,
+                        "pose_available": pose_available,
+                        "cam_height_mm": cam_height_mm,
+                        "label": f"Lowering {dz_cam_mm:.0f} mm",
+                        "attempt": attempt + 1,
+                    },
+                )
+                await asyncio.sleep(0)
+
+                if not req.dry_run:
+                    if q is None:
+                        obs = await asyncio.to_thread(robot.get_observation)
+                        q = obs_to_q(obs)
+                    n_z = max(N_STEPS, int(abs(z_delta[2]) / 0.0025))
+                    q = await asyncio.to_thread(cartesian_move, robot, q, z_delta, n_z)
+                    await asyncio.sleep(0.5)
+
+                last_descend_height_mm = dz_cam_mm
+
+                # ── VERIFY phase ────────────────────────────────────────────
+                # Probe is still down — capture frame and ask VLM
+                iteration += 1
+                try:
+                    camera_pil, bgr = await capture_frame()
+                except Exception as e:
+                    yield send(
+                        "done",
+                        {
+                            "success": False,
+                            "message": f"Camera error during verify: {e}",
+                        },
+                    )
+                    return
+
+                try:
+                    verify_result = await asyncio.to_thread(
+                        verify_placement,
+                        ref_pil,
+                        camera_pil,
+                        req.prompt,
+                        req.model,
+                        req.thinking_budget,
+                    )
+                except Exception as e:
+                    verify_result = {
+                        "success": False,
+                        "confidence": 0.0,
+                        "message": f"VLM verify error: {e}",
+                        "point": [500, 500],
+                    }
+
+                v_success = bool(verify_result.get("success", False))
+                v_conf = float(verify_result.get("confidence", 0.0))
+                v_message = verify_result.get("message", "")
+                v_point = verify_result.get("point", [500, 500])
+
+                # Annotate with verify result
+                ann_kp = [
+                    {
+                        "point": v_point if not v_success else [500, 500],
+                        "label": f"verify: {'HIT' if v_success else 'MISS'}",
+                    }
+                ]
+                annotated = annotate_image_pil(camera_pil, ann_kp)
+                img_b64 = annotated_image_to_base64(annotated)
+
+                yield send(
+                    "iteration",
+                    {
+                        "iteration": iteration,
+                        "phase": "verify",
+                        "action": "verify",
+                        "point": v_point if not v_success else [500, 500],
+                        "annotated_image": img_b64,
+                        "pose_available": True,
+                        "cam_height_mm": cam_height_mm,
+                        "confidence": v_conf,
+                        "reason": v_message,
+                        "attempt": attempt + 1,
+                    },
+                )
+                await asyncio.sleep(0)
+
+                if v_success and v_conf >= req.confidence_threshold:
                     yield send(
                         "done",
                         {
                             "success": True,
-                            "message": f"Placed at iteration {iteration}.",
+                            "message": f"Verified on-target at attempt {attempt + 1}, iteration {iteration}. {v_message}",
                         },
                     )
                     return
+
+                # ── RETRACT phase ───────────────────────────────────────────
+                attempt += 1
+                if attempt >= req.max_retries:
+                    yield send(
+                        "done",
+                        {
+                            "success": False,
+                            "message": f"Placement failed after {attempt} attempt(s). Last verify: {v_message}",
+                        },
+                    )
+                    return
+
+                iteration += 1
+                retract_z = cam_delta_to_robot(0.0, 0.0, -last_descend_height_mm)
+
+                yield send(
+                    "iteration",
+                    {
+                        "iteration": iteration,
+                        "phase": "retract",
+                        "action": "retract",
+                        "point": v_point if not v_success else [500, 500],
+                        "annotated_image": img_b64,
+                        "pose_available": True,
+                        "cam_height_mm": cam_height_mm,
+                        "reason": f"Retracting to retry (attempt {attempt}/{req.max_retries}). {v_message}",
+                        "attempt": attempt,
+                    },
+                )
+                await asyncio.sleep(0)
+
+                if not req.dry_run:
+                    if q is None:
+                        obs = await asyncio.to_thread(robot.get_observation)
+                        q = obs_to_q(obs)
+                    n_z = max(N_STEPS, int(abs(retract_z[2]) / 0.0025))
+                    q = await asyncio.to_thread(
+                        cartesian_move, robot, q, retract_z, n_z
+                    )
+                    await asyncio.sleep(0.5)
+
+                # Loop back to ALIGN phase with next iteration
+                continue
 
             yield send(
                 "done",
