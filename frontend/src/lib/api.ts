@@ -310,3 +310,97 @@ export async function executeStepKeypoints(
     }),
   });
 }
+
+// ---------------------------------------------------------------------------
+// Closed-loop placement (SSE)
+// ---------------------------------------------------------------------------
+
+export interface ClosedLoopIteration {
+  iteration: number;
+  action: "look" | "place";
+  point: [number, number];
+  annotated_image: string;
+  pose_available: boolean;
+  cam_height_mm: number | null;
+  reason?: string;
+  label?: string;
+  confidence?: number;
+}
+
+export interface ClosedLoopDone {
+  success: boolean;
+  message: string;
+}
+
+export type ClosedLoopCallbacks = {
+  onIteration?: (data: ClosedLoopIteration) => void;
+  onDone?: (data: ClosedLoopDone) => void;
+  onError?: (message: string) => void;
+};
+
+export async function runClosedLoop(
+  prompt: string,
+  referenceImages: { doc_name: string; image_name: string }[],
+  options: {
+    model?: string;
+    thinkingBudget?: number;
+    maxIterations?: number;
+    confidenceThreshold?: number;
+    zOffsetMm?: number;
+    dryRun?: boolean;
+    mockImage?: string;  // server-side path to a saved image; skips live camera
+  },
+  callbacks: ClosedLoopCallbacks,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/robot/closed-loop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      reference_images: referenceImages,
+      model: options.model ?? "gemini-3-flash-preview",
+      thinking_budget: options.thinkingBudget ?? 1024,
+      max_iterations: options.maxIterations ?? 10,
+      confidence_threshold: options.confidenceThreshold ?? 0.9,
+      z_offset_mm: options.zOffsetMm ?? 2.5,
+      dry_run: options.dryRun ?? false,
+      mock_image: options.mockImage ?? null,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    callbacks.onError?.(`API ${res.status}: ${body}`);
+    return;
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    callbacks.onError?.("No response body");
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    let currentEvent = "";
+    for (const line of lines) {
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
+        const data = JSON.parse(line.slice(6));
+        if (currentEvent === "iteration") callbacks.onIteration?.(data as ClosedLoopIteration);
+        else if (currentEvent === "done") callbacks.onDone?.(data as ClosedLoopDone);
+        else if (currentEvent === "error") callbacks.onError?.(data.message);
+      }
+    }
+  }
+}

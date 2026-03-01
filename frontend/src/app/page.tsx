@@ -61,8 +61,9 @@ import {
   motorStatus,
   motorMove,
   motorSetSpeed,
+  runClosedLoop,
 } from "@/lib/api";
-import type { EEPosition, IKResult } from "@/lib/api";
+import type { EEPosition, IKResult, ClosedLoopIteration } from "@/lib/api";
 
 import type {
   DocumentsResponse,
@@ -945,6 +946,14 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
   const [error, setError] = useState("");
   const [kpResult, setKpResult] = useState<KeypointResponse | null>(null);
 
+  // Closed-loop state
+  const [loopRunning, setLoopRunning] = useState(false);
+  const [loopDryRun, setLoopDryRun] = useState(false);
+  const [loopLog, setLoopLog] = useState<ClosedLoopIteration[]>([]);
+  const [loopDone, setLoopDone] = useState<{ success: boolean; message: string } | null>(null);
+  const [loopError, setLoopError] = useState("");
+  const loopLogRef = useRef<HTMLDivElement>(null);
+
   const defaultPrompt = (() => {
     const steps = result?.task_plan?.task_plan?.steps ?? [];
     const probeStep = steps.find((s: Step) => ["PROBE", "MOVE", "MEASURE"].includes(s.action));
@@ -983,12 +992,43 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
     }
   }
 
+  async function handleStartLoop() {
+    const p = prompt.trim() || defaultPrompt;
+    if (!p) return;
+    setLoopRunning(true);
+    setLoopLog([]);
+    setLoopDone(null);
+    setLoopError("");
+    try {
+      await runClosedLoop(
+        p,
+        referenceImages,
+        { dryRun: loopDryRun },
+        {
+          onIteration: (data) => {
+            setLoopLog((prev) => [...prev, data]);
+            setTimeout(() => {
+              loopLogRef.current?.scrollTo({ top: loopLogRef.current.scrollHeight, behavior: "smooth" });
+            }, 50);
+          },
+          onDone: (data) => setLoopDone(data),
+          onError: (msg) => setLoopError(msg),
+        },
+      );
+    } catch (e: unknown) {
+      setLoopError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoopRunning(false);
+    }
+  }
+
   if (!result?.task_plan) {
     return <EmptyState icon={<Camera size={32} />} text="Execute a task first to enable keypoint localisation." />;
   }
 
   return (
     <div className="animate-slide-up space-y-5">
+      {/* ── Prompt input ── */}
       <div className="space-y-2">
         <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
           Keypoint prompt
@@ -1000,15 +1040,38 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
           onChange={(e) => setPrompt(e.target.value)}
           placeholder={defaultPrompt || "e.g. locate the 5V LDO regulator and the multimeter probe tip"}
         />
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* single-shot locate */}
           <button
             onClick={handleRun}
-            disabled={loading}
+            disabled={loading || loopRunning}
             className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
           >
             {loading ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
-            {loading ? "Capturing & analysing\u2026" : "Locate on Camera"}
+            {loading ? "Capturing & analysing…" : "Locate on Camera"}
           </button>
+
+          {/* closed-loop run */}
+          <button
+            onClick={handleStartLoop}
+            disabled={loading || loopRunning}
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            {loopRunning ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+            {loopRunning ? "Loop running…" : "Run Closed Loop"}
+          </button>
+
+          {/* dry-run toggle */}
+          <label className="flex items-center gap-2 text-xs text-gray-500 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={loopDryRun}
+              onChange={(e) => setLoopDryRun(e.target.checked)}
+              className="rounded"
+            />
+            Dry run (no robot)
+          </label>
+
           {referenceImages.length > 0 && (
             <span className="text-xs text-gray-400">
               {referenceImages.length} reference image{referenceImages.length !== 1 ? "s" : ""} from docs
@@ -1023,6 +1086,7 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
         </div>
       )}
 
+      {/* ── Single-shot result ── */}
       {kpResult && (
         <div className="space-y-4">
           <div>
@@ -1085,6 +1149,90 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               </div>
             );
           })()}
+        </div>
+      )}
+
+      {/* ── Closed-loop log ── */}
+      {(loopLog.length > 0 || loopDone || loopError) && (
+        <div className="space-y-3">
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Closed-loop log
+          </h4>
+
+          <div
+            ref={loopLogRef}
+            className="max-h-96 overflow-y-auto space-y-3 pr-1"
+          >
+            {loopLog.map((iter, i) => (
+              <div
+                key={i}
+                className={`rounded-xl border p-3 space-y-2 ${
+                  iter.action === "place"
+                    ? "border-green-200 bg-green-50"
+                    : "border-gray-200 bg-gray-50"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono text-gray-400">#{iter.iteration}</span>
+                  <span
+                    className={`text-xs font-bold uppercase px-2 py-0.5 rounded-full ${
+                      iter.action === "place"
+                        ? "bg-green-600 text-white"
+                        : "bg-indigo-100 text-indigo-700"
+                    }`}
+                  >
+                    {iter.action}
+                  </span>
+                  {iter.action === "place" && iter.confidence !== undefined && (
+                    <span className="text-xs text-green-700 font-medium">
+                      conf {(iter.confidence * 100).toFixed(0)}%
+                    </span>
+                  )}
+                  {!iter.pose_available && (
+                    <span className="text-xs text-amber-600">no pose</span>
+                  )}
+                  {iter.cam_height_mm !== null && iter.cam_height_mm !== undefined && (
+                    <span className="text-xs text-gray-400 font-mono ml-auto">
+                      h={iter.cam_height_mm.toFixed(0)} mm
+                    </span>
+                  )}
+                </div>
+
+                {iter.action === "look" && iter.reason && (
+                  <p className="text-xs text-gray-500 italic">{iter.reason}</p>
+                )}
+                {iter.action === "place" && iter.label && (
+                  <p className="text-xs text-green-700 font-medium">{iter.label}</p>
+                )}
+
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={`data:image/png;base64,${iter.annotated_image}`}
+                  alt={`Iteration ${iter.iteration}`}
+                  className="w-full rounded-lg border border-gray-200 object-contain"
+                />
+              </div>
+            ))}
+          </div>
+
+          {loopDone && (
+            <div
+              className={`flex items-center gap-2 px-4 py-3 rounded-xl border text-sm font-medium ${
+                loopDone.success
+                  ? "border-green-200 bg-green-50 text-green-800"
+                  : "border-red-200 bg-red-50 text-red-800"
+              }`}
+            >
+              {loopDone.success ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+              {loopDone.message}
+            </div>
+          )}
+
+          {loopError && (
+            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+              {loopError}
+            </div>
+          )}
         </div>
       )}
     </div>
