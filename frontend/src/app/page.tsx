@@ -35,7 +35,6 @@ import {
   Minimize2,
   Download,
   Crosshair,
-  RotateCcw,
   Move3d,
   Plug,
   Unplug,
@@ -56,14 +55,14 @@ import {
   executeStepKeypoints,
   forwardKinematics,
   inverseKinematics,
-  getHomePosition,
   motorConnect,
   motorDisconnect,
   motorStatus,
   motorMove,
   motorSetSpeed,
+  getTooltipProjection,
 } from "@/lib/api";
-import type { EEPosition, IKResult } from "@/lib/api";
+import type { EEPosition, IKResult, TooltipProjection } from "@/lib/api";
 
 import type {
   DocumentsResponse,
@@ -631,10 +630,38 @@ function RobotPanel({ status }: { status: string }) {
 function CameraFeed() {
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   const streamUrl = `${apiBase}/api/camera/stream`;
+  const thumbStreamUrl = `${apiBase}/api/camera/stream?w=640&h=360`;
   const frameUrl = `${apiBase}/api/camera/frame`;
+  const fpsUrl = `${apiBase}/api/camera/fps`;
   const [error, setError] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [capturing, setCapturing] = useState(false);
+  const [fps, setFps] = useState<number | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<TooltipProjection | null>(null);
+
+  // Fetch tooltip projection once on mount (position is fixed in camera frame)
+  useEffect(() => {
+    getTooltipProjection()
+      .then(setTooltipPos)
+      .catch(() => {});
+  }, []);
+
+  // Poll FPS every second
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await fetch(fpsUrl);
+        if (res.ok) {
+          const data = await res.json();
+          if (active) setFps(data.fps);
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    const id = setInterval(poll, 1000);
+    return () => { active = false; clearInterval(id); };
+  }, [fpsUrl]);
 
   const captureSnapshot = async () => {
     setCapturing(true);
@@ -654,38 +681,64 @@ function CameraFeed() {
     }
   };
 
-  const feed = (
-    <div className={`rounded-xl overflow-hidden border-2 border-gray-800 bg-gray-900 aspect-video flex items-center justify-center relative ${expanded ? "w-full h-full rounded-none border-0" : ""}`}>
+  const feed = (isExpanded: boolean) => (
+    <div className={`rounded-xl overflow-hidden border-2 border-gray-800 bg-gray-900 aspect-video flex items-center justify-center relative ${isExpanded ? "w-full h-full rounded-none border-0" : ""}`}>
       <div className="absolute top-2 left-3 z-10 flex items-center gap-1.5 text-[10px] text-gray-500 bg-black/50 px-2 py-0.5 rounded-full">
         <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse-dot" />
         LIVE — CAM 1
+        {fps !== null && (
+          <span className="ml-1 text-gray-400">{fps.toFixed(1)} fps</span>
+        )}
       </div>
       <div className="absolute top-2 right-3 z-10 flex items-center gap-1">
         <button
           onClick={captureSnapshot}
           disabled={capturing || error}
           className="p-1 rounded bg-black/50 text-gray-400 hover:text-white hover:bg-black/70 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-          title="Capture snapshot"
+          title="Capture full-res snapshot"
         >
           {capturing ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
         </button>
         <button
-          onClick={() => setExpanded(!expanded)}
+          onClick={() => setExpanded(!isExpanded)}
           className="p-1 rounded bg-black/50 text-gray-400 hover:text-white hover:bg-black/70 transition-colors cursor-pointer"
-          title={expanded ? "Minimize" : "Expand"}
+          title={isExpanded ? "Minimize" : "Expand"}
         >
-          {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </button>
       </div>
       {error ? (
         <span className="text-gray-600 text-sm flex items-center gap-1.5"><Camera size={16} /> Camera offline</span>
       ) : (
         <img
-          src={streamUrl}
+          src={isExpanded ? streamUrl : thumbStreamUrl}
           alt="Robot camera feed"
-          className={`w-full h-full ${expanded ? "object-contain" : "object-cover"}`}
+          className={`w-full h-full ${isExpanded ? "object-contain" : "object-cover"}`}
           onError={() => setError(true)}
         />
+      )}
+      {/* Tool tip overlay */}
+      {tooltipPos?.visible && (
+        <div
+          className="absolute pointer-events-none z-10"
+          style={{
+            left: `${tooltipPos.u_norm * 100}%`,
+            top: `${tooltipPos.v_norm * 100}%`,
+            transform: "translate(-50%, -50%)",
+          }}
+        >
+          <svg width="28" height="28" viewBox="-14 -14 28 28">
+            <circle cx="0" cy="0" r="9" fill="none" stroke="red" strokeWidth="2" opacity="0.9" />
+            <line x1="-6" y1="-6" x2="6" y2="6" stroke="red" strokeWidth="2" opacity="0.9" />
+            <line x1="6" y1="-6" x2="-6" y2="6" stroke="red" strokeWidth="2" opacity="0.9" />
+          </svg>
+          <span
+            className="absolute left-1/2 text-[9px] font-mono text-red-400 whitespace-nowrap"
+            style={{ top: "16px", transform: "translateX(-50%)" }}
+          >
+            tip
+          </span>
+        </div>
       )}
     </div>
   );
@@ -697,13 +750,13 @@ function CameraFeed() {
         onClick={() => setExpanded(false)}
       >
         <div className="w-full h-full" onClick={(e) => e.stopPropagation()}>
-          {feed}
+          {feed(true)}
         </div>
       </div>
     );
   }
 
-  return feed;
+  return feed(false);
 }
 
 function KBSummary({ docs }: { docs: DocumentsResponse | null }) {
@@ -1132,10 +1185,8 @@ function JsonTab({ result }: { result: ExecuteResult | null }) {
 /* ========================================================================= */
 
 const JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
-const HOME_JOINTS = [0, -90, 90, 90, -90, 90];
-
 function IKPage() {
-  const [joints, setJoints] = useState<number[]>(HOME_JOINTS);
+  const [joints, setJoints] = useState<number[]>([0, 0, 0, 0, 0, 0]);
   const [ee, setEE] = useState<EEPosition | null>(null);
   const [targetX, setTargetX] = useState("0.0");
   const [targetY, setTargetY] = useState("-0.2");
@@ -1176,19 +1227,6 @@ function IKPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // Load home position on mount
-  useEffect(() => {
-    getHomePosition().then((home) => {
-      setJoints(home.joints_deg);
-      setEE(home.ee_position);
-      setTargetX(home.ee_position.x.toFixed(4));
-      setTargetY(home.ee_position.y.toFixed(4));
-      setTargetZ(home.ee_position.z.toFixed(4));
-      setTargetRoll(home.ee_position.roll.toFixed(1));
-      setTargetPitch(home.ee_position.pitch.toFixed(1));
-      setTargetYaw(home.ee_position.yaw.toFixed(1));
-    }).catch(() => {});
-  }, []);
 
   const runFK = async (j?: number[]) => {
     setLoading(true);
@@ -1200,9 +1238,9 @@ function IKPage() {
       setTargetX(res.ee_position.x.toFixed(4));
       setTargetY(res.ee_position.y.toFixed(4));
       setTargetZ(res.ee_position.z.toFixed(4));
-      setTargetRoll(res.ee_position.roll.toFixed(1));
-      setTargetPitch(res.ee_position.pitch.toFixed(1));
-      setTargetYaw(res.ee_position.yaw.toFixed(1));
+      setTargetRoll(res.ee_position.roll_deg.toFixed(1));
+      setTargetPitch(res.ee_position.pitch_deg.toFixed(1));
+      setTargetYaw(res.ee_position.yaw_deg.toFixed(1));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "FK failed");
     } finally {
@@ -1227,7 +1265,7 @@ function IKPage() {
       }
       const res = await inverseKinematics(params);
       setIkResult(res);
-      setJoints(res.joints_deg);
+      setJoints(res.joints_list);
       setEE(res.ee_position);
       setViolations(res.joint_violations);
     } catch (e: unknown) {
@@ -1235,12 +1273,6 @@ function IKPage() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const goHome = () => {
-    setJoints(HOME_JOINTS);
-    setIkResult(null);
-    runFK(HOME_JOINTS);
   };
 
   const updateJoint = (idx: number, val: number) => {
@@ -1256,6 +1288,12 @@ function IKPage() {
       const res = await motorConnect();
       setRobotConnected(true);
       setRobotPort(res.port);
+      if (res.positions_deg) {
+        setLivePositions(res.positions_deg);
+        // Seed the joint sliders so they reflect the actual arm state
+        const order = ["shoulder_pan","shoulder_lift","elbow_flex","wrist_flex","wrist_roll","gripper"];
+        setJoints(order.map(k => res.positions_deg[k] ?? 0));
+      }
       setSendStatus(`Connected on ${res.port}`);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Connection failed");
@@ -1335,12 +1373,6 @@ function IKPage() {
             Inverse Kinematics
           </button>
         </div>
-        <button
-          onClick={goHome}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-500 hover:text-teal-600 hover:bg-teal-50 rounded-lg transition-colors"
-        >
-          <RotateCcw size={14} /> Home Position
-        </button>
       </div>
 
       {/* Robot connection bar */}
@@ -1573,9 +1605,9 @@ function IKPage() {
                   <span>x: {ee.x.toFixed(4)} m</span>
                   <span>y: {ee.y.toFixed(4)} m</span>
                   <span>z: {ee.z.toFixed(4)} m</span>
-                  <span>roll: {ee.roll.toFixed(1)}&deg;</span>
-                  <span>pitch: {ee.pitch.toFixed(1)}&deg;</span>
-                  <span>yaw: {ee.yaw.toFixed(1)}&deg;</span>
+                  <span>roll: {ee.roll_deg.toFixed(1)}&deg;</span>
+                  <span>pitch: {ee.pitch_deg.toFixed(1)}&deg;</span>
+                  <span>yaw: {ee.yaw_deg.toFixed(1)}&deg;</span>
                 </div>
               </div>
             )}

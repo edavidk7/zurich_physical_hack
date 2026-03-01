@@ -45,6 +45,11 @@ from typing import Sequence
 
 import numpy as np
 
+try:
+    from src.constants import TOOL_OFFSET_EE_M as _DEFAULT_TOOL_OFFSET
+except ImportError:
+    from constants import TOOL_OFFSET_EE_M as _DEFAULT_TOOL_OFFSET
+
 # ---------------------------------------------------------------------------
 # URDF location and mesh-stripping
 # ---------------------------------------------------------------------------
@@ -145,7 +150,7 @@ class SO101IKSolver:
         Example: [0, 0, -0.03] means the tip is 3 cm along the EE -Z axis.
     """
 
-    def __init__(self, tool_offset: Sequence[float] = (0.0, 0.0, 0.0)) -> None:
+    def __init__(self, tool_offset: Sequence[float] = _DEFAULT_TOOL_OFFSET) -> None:
         import placo  # type: ignore[import-not-found]
 
         self.tool_offset = np.asarray(tool_offset, dtype=float)

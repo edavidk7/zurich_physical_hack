@@ -8,6 +8,11 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageEnhance, ImageFilter
 
+try:
+    from src.constants import CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_JPEG_QUALITY
+except ImportError:
+    from constants import CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_JPEG_QUALITY
+
 _IS_LINUX = platform.system() == "Linux"
 
 if _IS_LINUX:
@@ -24,10 +29,10 @@ _JPEG_MAGIC = b"\xff\xd8\xff"
 @dataclass
 class CameraConfig:
     index: int = 0
-    width: int = 1280
-    height: int = 720
+    width: int = CAMERA_WIDTH
+    height: int = CAMERA_HEIGHT
     warmup_frames: int = 15
-    jpeg_quality: int = 85
+    jpeg_quality: int = CAMERA_JPEG_QUALITY
     software_sharpen: float = 2.0   # 1.0 = off, 2.0 = noticeable, 4.0 = strong
 
 
@@ -182,8 +187,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--width",  type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width",  type=int, default=CAMERA_WIDTH)
+    parser.add_argument("--height", type=int, default=CAMERA_HEIGHT)
     parser.add_argument("--sharpen", type=float, default=2.0, help="Software sharpen factor")
     parser.add_argument("--out", default="frame.jpg")
     args = parser.parse_args()
