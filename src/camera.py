@@ -182,6 +182,8 @@ def CameraCapture(config: CameraConfig | None = None) -> _BaseCameraCapture:
 
 if __name__ == "__main__":
     import argparse
+    import datetime
+    import cv2
     from pathlib import Path
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -190,16 +192,55 @@ if __name__ == "__main__":
     parser.add_argument("--width",  type=int, default=CAMERA_WIDTH)
     parser.add_argument("--height", type=int, default=CAMERA_HEIGHT)
     parser.add_argument("--sharpen", type=float, default=2.0, help="Software sharpen factor")
-    parser.add_argument("--out", default="frame.jpg")
     args = parser.parse_args()
 
     config = CameraConfig(
         index=args.camera, width=args.width, height=args.height,
         software_sharpen=args.sharpen,
     )
+
+    save_dir: Path | None = None
+    frame_count = 0
+
+    print("Live view started. Hold S to save frames. Press Q or ESC to quit.")
+
     with CameraCapture(config) as cam:
-        jpeg = cam.capture_jpeg()
-    Path(args.out).write_bytes(jpeg)
-    print(f"Saved {len(jpeg):,} bytes → {args.out}")
+        while True:
+            jpeg = cam.capture_jpeg()
+
+            # Decode JPEG → BGR for OpenCV display
+            arr = cv2.imdecode(
+                __import__("numpy").frombuffer(jpeg, dtype=__import__("numpy").uint8),
+                cv2.IMREAD_COLOR,
+            )
+
+            key = cv2.waitKey(1) & 0xFF
+
+            # S held → save frame
+            if key == ord("s") or key == ord("S"):
+                if save_dir is None:
+                    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    save_dir = Path(f"capture_{ts}")
+                    save_dir.mkdir(parents=True)
+                    print(f"Saving to {save_dir}/")
+                out_path = save_dir / f"frame_{frame_count:05d}.jpg"
+                out_path.write_bytes(jpeg)
+                frame_count += 1
+                # Overlay indicator on display copy
+                display = arr.copy()
+                cv2.putText(display, f"SAVED {frame_count}", (10, 34),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                cv2.imshow("Camera", display)
+                print(f"  {out_path}")
+                continue
+
+            cv2.imshow("Camera", arr)
+
+            if key in (ord("q"), ord("Q"), 27):  # Q or ESC
+                break
+
+    cv2.destroyAllWindows()
+    if save_dir:
+        print(f"Saved {frame_count} frame(s) to {save_dir}/")
 
 

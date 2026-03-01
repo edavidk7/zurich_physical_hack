@@ -12,8 +12,8 @@ import numpy as np
 # Offset of the tool tip from the Fixed_Jaw end-effector frame origin,
 # expressed in the EE (Fixed_Jaw) frame, in metres.
 # For the SO-101 the probe extends along EE +X.
-# TOOL_OFFSET_EE_M: list[float] = [0.059, 0.0, 0.0]
-TOOL_OFFSET_EE_M: list[float] = [0.0, 0.0, 0.0]
+TOOL_OFFSET_EE_M: list[float] = [0.059, 0.0, 0.0]
+# TOOL_OFFSET_EE_M: list[float] = [0.0, 0.0, 0.0]
 
 
 # ── Camera mount ──────────────────────────────────────────────────────────────
@@ -27,9 +27,9 @@ CAM_TILT_EE_DEG: float = -35.0
 # Used to derive the fixed camera-in-EE transform T_CAM_EE at startup.
 # Re-run robot_cam_calibration.py to update this after re-mounting the camera.
 TOOL_INTERSECT_DIST = 0.0115
-INTERSECT_TO_TIP = 0.0025
-INTERSECT_ANGLE = np.deg2rad(55)
-P_TIP_CAM_M: list[float] = [0.001, -np.sin(INTERSECT_ANGLE) * INTERSECT_TO_TIP, TOOL_INTERSECT_DIST + np.cos(INTERSECT_ANGLE) * INTERSECT_TO_TIP]
+INTERSECT_TO_TIP = 0.0020
+INTERSECT_ANGLE = np.deg2rad(35)
+P_TIP_CAM_M: list[float] = [0.001, -0.001, TOOL_INTERSECT_DIST + np.cos(INTERSECT_ANGLE) * INTERSECT_TO_TIP]
 
 # ── Workspace checkerboard ────────────────────────────────────────────────────
 
