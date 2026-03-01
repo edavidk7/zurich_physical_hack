@@ -28,8 +28,16 @@ from src.high_level_planner import (
     load_and_prep_image,
 )
 from src.constants import CAMERA_WIDTH, CAMERA_HEIGHT
-from src.ik_solver import SO101IKSolver
 from src.motor_control import get_motor_controller, find_robot_port
+
+# Try placo-based solver; fall back to pure-Python kinematics on Windows
+_HAS_PLACO = True
+try:
+    from src.ik_solver import SO101IKSolver
+except Exception:
+    _HAS_PLACO = False
+
+from src.kinematics import SOArmKinematics
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -586,16 +594,43 @@ async def robot_status():
 # Routes — Kinematics (FK / IK)
 # ---------------------------------------------------------------------------
 
-_ik_solver: SO101IKSolver | None = None
+_ik_solver: "SO101IKSolver | None" = None
 _ik_solver_lock = threading.Lock()
+_pure_kin: SOArmKinematics | None = None
 
 
-def get_ik_solver() -> SO101IKSolver:
+def get_ik_solver():
+    """Return placo-based solver or None if unavailable."""
     global _ik_solver
+    if not _HAS_PLACO:
+        return None
     with _ik_solver_lock:
         if _ik_solver is None:
             _ik_solver = SO101IKSolver()
         return _ik_solver
+
+
+def get_pure_kin() -> SOArmKinematics:
+    """Return the pure-Python FK/IK engine (always available)."""
+    global _pure_kin
+    if _pure_kin is None:
+        _pure_kin = SOArmKinematics()
+    return _pure_kin
+
+
+def get_kinematics() -> SOArmKinematics:
+    """Alias used by FK/IK endpoints — always available."""
+    return get_pure_kin()
+
+
+_JOINT_LIMITS_DEG = {
+    "shoulder_pan":  (-91.7,  91.7),
+    "shoulder_lift": (-90.0,  90.0),
+    "elbow_flex":    (-91.7,  80.2),
+    "wrist_flex":    (-95.7,  95.7),
+    "wrist_roll":    (-180.0, 180.0),
+    "gripper":       (-12.0,  85.9),
+}
 
 
 _MOTOR_NAMES_ORDER = [
@@ -630,46 +665,29 @@ async def forward_kinematics(req: FKRequest):
     """Compute end-effector pose from joint angles (degrees)."""
     import numpy as np
 
-    solver = get_ik_solver()
-    q_deg = {name: float(deg) for name, deg in zip(_MOTOR_NAMES_ORDER, req.joints_deg)}
-    T = solver.fk(q_deg)
-    pos = T[:3, 3]
-    R = T[:3, :3]
-    # Extract RPY (ZYX convention) from rotation matrix
-    pitch = float(np.arcsin(-R[2, 0]))
-    cy = np.cos(pitch)
-    if abs(cy) > 1e-6:
-        roll = float(np.arctan2(R[2, 1] / cy, R[2, 2] / cy))
-        yaw = float(np.arctan2(R[1, 0] / cy, R[0, 0] / cy))
-    else:
-        roll = float(np.arctan2(-R[1, 2], R[1, 1]))
-        yaw = 0.0
-    # Check joint limits
-    from src.ik_solver import _LIMITS_DEG
+    kin = get_kinematics()
+    q_mech_rad = np.deg2rad(req.joints_deg)
+    ee = kin.get_ee_position(q_mech_rad)
 
+    q_deg = {name: float(deg) for name, deg in zip(_MOTOR_NAMES_ORDER, req.joints_deg)}
     violations = [
         name
         for name, deg in q_deg.items()
-        if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]
+        if deg < _JOINT_LIMITS_DEG[name][0] or deg > _JOINT_LIMITS_DEG[name][1]
     ]
-    roll_d, pitch_d, yaw_d = (
-        float(np.rad2deg(roll)),
-        float(np.rad2deg(pitch)),
-        float(np.rad2deg(yaw)),
-    )
     print(
-        f"[FK] EE pos = ({pos[0] * 1000:.1f}, {pos[1] * 1000:.1f}, {pos[2] * 1000:.1f}) mm  "
-        f"RPY = ({roll_d:.1f}°, {pitch_d:.1f}°, {yaw_d:.1f}°)"
+        f"[FK] EE pos = ({ee['x'] * 1000:.1f}, {ee['y'] * 1000:.1f}, {ee['z'] * 1000:.1f}) mm  "
+        f"RPY = ({ee['roll']:.1f}°, {ee['pitch']:.1f}°, {ee['yaw']:.1f}°)"
         + (f"  violations={violations}" if violations else "")
     )
     return {
         "ee_position": {
-            "x": float(pos[0]),
-            "y": float(pos[1]),
-            "z": float(pos[2]),
-            "roll_deg": roll_d,
-            "pitch_deg": pitch_d,
-            "yaw_deg": yaw_d,
+            "x": ee["x"],
+            "y": ee["y"],
+            "z": ee["z"],
+            "roll_deg": ee["roll"],
+            "pitch_deg": ee["pitch"],
+            "yaw_deg": ee["yaw"],
         },
         "joint_violations": violations,
     }
@@ -680,91 +698,69 @@ async def inverse_kinematics(req: IKRequest):
     """Compute joint angles to reach a target end-effector position."""
     import numpy as np
 
-    solver = get_ik_solver()
+    kin = get_kinematics()
 
-    # Build initial guess: prefer live motor positions, fall back to request or zeros
+    # Build initial guess (mechanical angles in radians)
     mc = get_motor_controller()
     if mc.is_connected:
         live = mc.read_positions().get("positions_deg", {})
-        q_init = {n: float(live.get(n, 0.0)) for n in _MOTOR_NAMES_ORDER}
+        q_init_deg = [float(live.get(n, 0.0)) for n in _MOTOR_NAMES_ORDER]
     elif req.init_joints_deg and len(req.init_joints_deg) == 6:
-        q_init = {
-            name: float(deg)
-            for name, deg in zip(_MOTOR_NAMES_ORDER, req.init_joints_deg)
-        }
+        q_init_deg = [float(d) for d in req.init_joints_deg]
     else:
-        q_init = {n: 0.0 for n in _MOTOR_NAMES_ORDER}
-    q_init["gripper"] = req.gripper_deg
+        q_init_deg = [0.0] * 6
+    q_init_deg[5] = req.gripper_deg
+    q_init_rad = np.deg2rad(q_init_deg)
 
     # Optional orientation target
-    target_R = None
+    target_rpy_deg = None
+    use_orientation = False
     if req.roll is not None and req.pitch is not None and req.yaw is not None:
-        r, p, y = np.deg2rad([req.roll, req.pitch, req.yaw])
-        cr, sr = np.cos(r), np.sin(r)
-        cp, sp = np.cos(p), np.sin(p)
-        cy, sy = np.cos(y), np.sin(y)
-        target_R = np.array(
-            [
-                [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-                [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-                [-sp, cp * sr, cp * cr],
-            ]
-        )
+        target_rpy_deg = (req.roll, req.pitch, req.yaw)
+        use_orientation = True
 
-    target_pos = np.array([req.x, req.y, req.z])
-    q_result = solver.ik(q_init, target_pos, target_R=target_R)
+    result = kin.inverse_kinematics(
+        target_xyz=(req.x, req.y, req.z),
+        target_rpy_deg=target_rpy_deg,
+        q_init_mech=q_init_rad,
+        gripper=np.deg2rad(req.gripper_deg),
+        use_orientation=use_orientation,
+    )
 
-    # Compute achieved EE position and orientation via FK on the result
-    T_achieved = solver.fk(q_result)
-    pos = T_achieved[:3, 3]
-    R = T_achieved[:3, :3]
-    tip_achieved = pos + R @ solver.tool_offset
-    error_mm = float(np.linalg.norm(tip_achieved - target_pos) * 1000)
+    joints_deg_list = result["joints_deg"]
+    ee = result["ee_position"]
+    error_mm = result["error_mm"]
 
-    # Extract RPY (ZYX convention)
-    pitch_r = float(np.arcsin(-R[2, 0]))
-    cy_r = np.cos(pitch_r)
-    if abs(cy_r) > 1e-6:
-        roll_r = float(np.arctan2(R[2, 1] / cy_r, R[2, 2] / cy_r))
-        yaw_r = float(np.arctan2(R[1, 0] / cy_r, R[0, 0] / cy_r))
-    else:
-        roll_r = float(np.arctan2(-R[1, 2], R[1, 1]))
-        yaw_r = 0.0
-
-    from src.ik_solver import _LIMITS_DEG
-
+    q_deg_dict = {name: deg for name, deg in zip(_MOTOR_NAMES_ORDER, joints_deg_list)}
     violations = [
         name
-        for name, deg in q_result.items()
-        if deg < _LIMITS_DEG[name][0] or deg > _LIMITS_DEG[name][1]
+        for name, deg in q_deg_dict.items()
+        if deg < _JOINT_LIMITS_DEG[name][0] or deg > _JOINT_LIMITS_DEG[name][1]
     ]
-    joints_list = [q_result[n] for n in _MOTOR_NAMES_ORDER]
-    roll_d = float(np.rad2deg(roll_r))
-    pitch_d = float(np.rad2deg(pitch_r))
-    yaw_d = float(np.rad2deg(yaw_r))
+
     print(
         f"[IK] target=({req.x * 1000:.1f}, {req.y * 1000:.1f}, {req.z * 1000:.1f}) mm  "
-        f"achieved=({pos[0] * 1000:.1f}, {pos[1] * 1000:.1f}, {pos[2] * 1000:.1f}) mm  "
-        f"error={error_mm:.2f} mm  success={error_mm < 10.0}"
+        f"achieved=({ee['x'] * 1000:.1f}, {ee['y'] * 1000:.1f}, {ee['z'] * 1000:.1f}) mm  "
+        f"error={error_mm:.2f} mm  success={result['success']}"
     )
     print(
-        "[IK] joints = " + "  ".join(f"{n[:4]}={v:.1f}°" for n, v in q_result.items())
+        "[IK] joints = " + "  ".join(f"{n[:4]}={v:.1f}°" for n, v in q_deg_dict.items())
     )
     if violations:
         print(f"[IK] LIMIT VIOLATIONS: {violations}")
     return {
-        "joints_deg": q_result,
-        "joints_list": joints_list,
+        "joints_deg": q_deg_dict,
+        "joints_list": joints_deg_list,
         "ee_position": {
-            "x": float(pos[0]),
-            "y": float(pos[1]),
-            "z": float(pos[2]),
-            "roll_deg": roll_d,
-            "pitch_deg": pitch_d,
-            "yaw_deg": yaw_d,
+            "x": ee["x"],
+            "y": ee["y"],
+            "z": ee["z"],
+            "roll_deg": ee["roll"],
+            "pitch_deg": ee["pitch"],
+            "yaw_deg": ee["yaw"],
         },
         "error_mm": error_mm,
-        "success": error_mm < 10.0,
+        "success": result["success"],
         "joint_violations": violations,
     }
 
@@ -772,17 +768,19 @@ async def inverse_kinematics(req: IKRequest):
 @app.get("/api/kinematics/home")
 async def kinematics_home():
     """Return the home pose joint angles and corresponding EE position."""
-    solver = get_ik_solver()
+    import numpy as np
+
+    kin = get_kinematics()
     q_home_deg = {n: 0.0 for n in _MOTOR_NAMES_ORDER}
-    T = solver.fk(q_home_deg)
-    pos = T[:3, 3]
+    q_home_rad = np.zeros(6)
+    ee = kin.get_ee_position(q_home_rad)
     return {
         "joints_deg": q_home_deg,
         "joint_names": _MOTOR_NAMES_ORDER,
         "ee_position": {
-            "x": float(pos[0]),
-            "y": float(pos[1]),
-            "z": float(pos[2]),
+            "x": ee["x"],
+            "y": ee["y"],
+            "z": ee["z"],
         },
     }
 
@@ -1325,6 +1323,99 @@ async def move_to_keypoint(req: MoveToKeypointRequest):
     result["message"] = f"Moved {dist_m * 100:.1f} cm toward keypoint."
     print(f"[move-to-kp] done — moved {dist_m*100:.1f} cm")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sequence: Home → Pos1 → Home → Pos2
+# ---------------------------------------------------------------------------
+
+_STEP_LABELS = ["Home", "Position 1", "Home", "Position 2", "Home"]
+_sequence_status: dict = {
+    "running": False, "step": "", "step_num": 0, "total": len(_STEP_LABELS),
+    "error": None, "done": False, "aborted": False, "labels": _STEP_LABELS,
+}
+_sequence_abort = threading.Event()
+
+SEQ_HOME = [3, -26, -7, 92, -65, 39]
+SEQ_POS1 = {"x": 0.0466, "y": -0.3202, "z": 0.0099, "roll": 87.5, "pitch": 1.2, "yaw": 34.6}
+SEQ_POS2 = {"x": 0.0160, "y": -0.2967, "z": 0.0110, "roll": 90.7, "pitch": -0.3, "yaw": 28.5}
+SEQ_SPEED = 10
+SEQ_HOLD = 3
+
+
+def _run_sequence_blocking():
+    """Execute the demo sequence in a background thread."""
+    import numpy as np
+    global _sequence_status
+    ctrl = get_motor_controller()
+    kin = get_kinematics()
+    try:
+        def solve(pos):
+            target_xyz = (pos["x"], pos["y"], pos["z"])
+            target_rpy = (pos["roll"], pos["pitch"], pos["yaw"])
+            q_init = np.zeros(6)
+            result = kin.inverse_kinematics(target_xyz, target_rpy, q_init, pos.get("gripper", 39.0), True)
+            if not result["success"]:
+                raise ValueError(f"IK failed: error={result['error_mm']:.1f}mm")
+            return result["joints_deg"]
+
+        joints1 = solve(SEQ_POS1)
+        joints2 = solve(SEQ_POS2)
+
+        steps = [
+            ("Home", SEQ_HOME),
+            ("Position 1", joints1),
+            ("Home", SEQ_HOME),
+            ("Position 2", joints2),
+            ("Home", SEQ_HOME),
+        ]
+
+        for i, (label, joints) in enumerate(steps, 1):
+            if _sequence_abort.is_set():
+                _sequence_status = {"running": False, "step": f"Aborted at step {i}", "step_num": i, "total": 5, "error": None, "done": False, "aborted": True, "labels": _STEP_LABELS}
+                return
+            _sequence_status = {"running": True, "step": f"Moving to {label}", "step_num": i, "total": 5, "error": None, "done": False, "aborted": False, "labels": _STEP_LABELS}
+            ctrl.write_joint_array(joints, SEQ_SPEED)
+            _sequence_status["step"] = f"Holding at {label}"
+            for _ in range(int(SEQ_HOLD / 0.25)):
+                if _sequence_abort.is_set():
+                    _sequence_status = {"running": False, "step": f"Aborted at {label}", "step_num": i, "total": 5, "error": None, "done": False, "aborted": True, "labels": _STEP_LABELS}
+                    return
+                time.sleep(0.25)
+
+        _sequence_status = {"running": False, "step": "Complete", "step_num": 5, "total": 5, "error": None, "done": True, "aborted": False, "labels": _STEP_LABELS}
+    except Exception as e:
+        _sequence_status = {"running": False, "step": "Error", "step_num": 0, "total": 5, "error": str(e), "done": False, "aborted": False, "labels": _STEP_LABELS}
+
+
+@app.post("/api/sequence/run")
+async def run_sequence():
+    """Start the Home→Pos1→Home→Pos2→Home demo sequence."""
+    global _sequence_status
+    if _sequence_status["running"]:
+        raise HTTPException(409, "Sequence already running")
+    ctrl = get_motor_controller()
+    if not ctrl.is_connected:
+        raise HTTPException(400, "Robot not connected")
+    _sequence_abort.clear()
+    _sequence_status = {"running": True, "step": "Starting", "step_num": 0, "total": 5, "error": None, "done": False, "aborted": False, "labels": _STEP_LABELS}
+    t = threading.Thread(target=_run_sequence_blocking, daemon=True)
+    t.start()
+    return {"status": "started", "labels": _STEP_LABELS}
+
+
+@app.post("/api/sequence/abort")
+async def abort_sequence():
+    """Abort the running sequence."""
+    if not _sequence_status["running"]:
+        raise HTTPException(400, "No sequence running")
+    _sequence_abort.set()
+    return {"status": "aborting"}
+
+
+@app.get("/api/sequence/status")
+async def sequence_status():
+    return _sequence_status
 
 
 # ---------------------------------------------------------------------------

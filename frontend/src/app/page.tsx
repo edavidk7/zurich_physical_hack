@@ -41,6 +41,7 @@ import {
   Wifi,
   WifiOff,
   Home as HomeIcon,
+  Square,
 } from "lucide-react";
 
 import {
@@ -49,7 +50,6 @@ import {
   executeTaskStream,
   imageUrl,
   chatWithAgent,
-  executeOnRobot,
   getDocumentContent,
   locateKeypoints,
   executeStepKeypoints,
@@ -354,30 +354,73 @@ function TaskPage({
   pipelineStages: { message: string; status: "pending" | "active" | "done" | "error" }[];
   searchHits: { document: string; relevant: boolean }[];
 }) {
-  const [feedback, setFeedback] = useState("");
   const [deploying, setDeploying] = useState(false);
   const [deployMessage, setDeployMessage] = useState("");
+  const [seqLabels, setSeqLabels] = useState<string[]>([]);
+  const [seqStepNum, setSeqStepNum] = useState(0);
+  const [seqRunning, setSeqRunning] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function stopPolling() {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }
 
   async function handleDeploy() {
     if (!result?.task_plan) return;
     setDeploying(true);
     setDeployMessage("");
+    setSeqLabels([]);
+    setSeqStepNum(0);
+    setSeqRunning(false);
     try {
-      const res = await executeOnRobot(result.task_plan as unknown as Record<string, unknown>, feedback || undefined);
-      setDeployMessage(res.message);
+      const res = await fetch("http://localhost:8000/api/sequence/run", { method: "POST" });
+      const data = await res.json();
+      if (data.status === "already_running") {
+        setDeployMessage("Sequence already running");
+        setDeploying(false);
+        return;
+      }
+      const labels: string[] = data.labels ?? [];
+      setSeqLabels(labels);
+      setSeqRunning(true);
       setRobotStatus("running");
-      // Simulate completion after a few seconds
-      setTimeout(() => {
-        setRobotStatus("complete");
-        setDeployMessage("Execution complete — all steps finished.");
-      }, 5000);
+      setDeploying(false);
+
+      // poll status
+      stopPolling();
+      pollRef.current = setInterval(async () => {
+        try {
+          const sr = await fetch("http://localhost:8000/api/sequence/status");
+          const st = await sr.json();
+          setSeqStepNum(st.current_step ?? 0);
+          if (st.done) {
+            stopPolling();
+            setSeqRunning(false);
+            if (st.aborted) {
+              setDeployMessage("Sequence aborted by user.");
+              setRobotStatus("idle");
+            } else if (st.error) {
+              setDeployMessage(`Error: ${st.error}`);
+              setRobotStatus("error");
+            } else {
+              setDeployMessage("Execution complete — all steps finished.");
+              setRobotStatus("complete");
+            }
+          }
+        } catch { /* ignore polling errors */ }
+      }, 500);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Deploy failed";
       setDeployMessage(`Error: ${msg}`);
       setRobotStatus("error");
-    } finally {
       setDeploying(false);
     }
+  }
+
+  async function handleAbort() {
+    try {
+      await fetch("http://localhost:8000/api/sequence/abort", { method: "POST" });
+    } catch { /* ignore */ }
   }
 
   return (
@@ -557,37 +600,69 @@ function TaskPage({
               <Play size={14} className="text-teal-600" /> Deploy to Robot
             </h4>
 
-            {/* Feedback / adjustments */}
-            <textarea
-              value={feedback}
-              onChange={(e) => setFeedback(e.target.value)}
-              placeholder="Optional: add corrections or adjustments to the plan…"
-              rows={2}
-              className="w-full resize-none rounded-lg border border-gray-200 p-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400/40 focus:border-teal-400 placeholder:text-gray-300 mb-3"
-            />
+            {/* Step progress list */}
+            {seqLabels.length > 0 && (
+              <ul className="space-y-1 mb-3">
+                {seqLabels.map((label, i) => {
+                  const stepIdx = i + 1;
+                  const done = stepIdx < seqStepNum || (!seqRunning && !deployMessage.startsWith("Error") && !deployMessage.includes("aborted") && seqStepNum >= seqLabels.length);
+                  const active = seqRunning && stepIdx === seqStepNum;
+                  return (
+                    <li key={i} className={`flex items-center gap-2 text-xs ${
+                      done ? "text-emerald-600" : active ? "text-teal-700 font-semibold" : "text-gray-400"
+                    }`}>
+                      {done ? (
+                        <CheckCircle2 size={13} className="text-emerald-500" />
+                      ) : active ? (
+                        <Loader2 size={13} className="animate-spin text-teal-600" />
+                      ) : (
+                        <span className="w-[13px] h-[13px] rounded-full border border-gray-300 inline-block" />
+                      )}
+                      {label}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
 
-            <button
-              onClick={handleDeploy}
-              disabled={deploying || robotStatus === "running"}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{
-                background: deploying || robotStatus === "running"
-                  ? "#aaa"
-                  : "linear-gradient(135deg, #37e0d8, #1a8a84)",
-              }}
-            >
-              {deploying ? (
-                <Loader2 size={15} className="animate-spin" />
-              ) : robotStatus === "running" ? (
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <ArrowRight size={15} />
+            <div className="flex gap-2">
+              <button
+                onClick={handleDeploy}
+                disabled={deploying || seqRunning}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  background: deploying || seqRunning
+                    ? "#aaa"
+                    : "linear-gradient(135deg, #37e0d8, #1a8a84)",
+                }}
+              >
+                {deploying ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : seqRunning ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <ArrowRight size={15} />
+                )}
+                {deploying ? "Starting…" : seqRunning ? "Running…" : "Execute on Robot"}
+              </button>
+
+              {seqRunning && (
+                <button
+                  onClick={handleAbort}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg text-sm font-semibold text-white bg-red-500 hover:bg-red-600 transition-colors"
+                  title="Abort sequence"
+                >
+                  <Square size={13} /> Stop
+                </button>
               )}
-              {deploying ? "Sending…" : robotStatus === "running" ? "Executing…" : "Execute on Robot"}
-            </button>
+            </div>
 
             {deployMessage && (
-              <p className={`mt-2 text-xs ${deployMessage.startsWith("Error") ? "text-red-600" : "text-emerald-600"}`}>
+              <p className={`mt-2 text-xs ${
+                deployMessage.startsWith("Error") ? "text-red-600"
+                  : deployMessage.includes("aborted") ? "text-amber-600"
+                  : "text-emerald-600"
+              }`}>
                 {deployMessage}
               </p>
             )}
@@ -1002,6 +1077,7 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [kpResult, setKpResult] = useState<KeypointResponse | null>(null);
+  const autoRanRef = useRef(false);
 
   // Move-to-keypoint state
   const [selectedKp, setSelectedKp] = useState<number | null>(null);
@@ -1060,6 +1136,26 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
       };
     })
   );
+
+  // Auto-run keypoint detection when plan is available
+  useEffect(() => {
+    if (autoRanRef.current || !result?.task_plan || !defaultPrompt) return;
+    autoRanRef.current = true;
+    (async () => {
+      setLoading(true);
+      setError("");
+      setKpResult(null);
+      try {
+        const res = await locateKeypoints(defaultPrompt, referenceImages);
+        setKpResult(res);
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : "Auto-detect failed");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result?.task_plan, defaultPrompt]);
 
   async function handleRun() {
     const p = prompt.trim() || defaultPrompt;
@@ -1550,6 +1646,31 @@ function IKPage() {
                 className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-1.5"
               >
                 <HomeIcon size={12} /> Home
+              </button>
+              <button
+                onClick={async () => {
+                  setSending(true); setSendStatus(null); setError(null);
+                  try {
+                    const res = await fetch('http://localhost:8000/api/sequence/run', { method: 'POST' });
+                    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || `Sequence failed (${res.status})`); }
+                    setSendStatus('Sequence started! Home → Pos1 → Home → Pos2 → Home (~15s)');
+                    // Poll status
+                    const poll = setInterval(async () => {
+                      try {
+                        const sr = await fetch('http://localhost:8000/api/sequence/status');
+                        const st = await sr.json();
+                        if (st.done) { clearInterval(poll); setSendStatus('Sequence complete!'); setSending(false); }
+                        else if (st.error) { clearInterval(poll); setError(st.error); setSending(false); }
+                        else { setSendStatus(`Step ${st.step_num}/${st.total}: ${st.step}`); }
+                      } catch { clearInterval(poll); setSending(false); }
+                    }, 1000);
+                  } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Sequence failed'); setSending(false); }
+                }}
+                disabled={sending}
+                className="px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-colors flex items-center gap-1.5"
+                style={{ background: sending ? '#9ca3af' : '#f59e0b' }}
+              >
+                <Play size={12} /> Run Sequence
               </button>
               <button
                 onClick={handleSendToRobot}
