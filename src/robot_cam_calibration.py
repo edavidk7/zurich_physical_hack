@@ -78,9 +78,9 @@ from pathlib import Path
 import numpy as np
 
 try:
-    from src.constants import TOOL_OFFSET_EE_M, CAM_TILT_EE_DEG, P_TIP_CAM_M
+    from src.constants import TOOL_OFFSET_EE_M, CAM_TILT_EE_DEG, P_TIP_CAM_M, CAM_MOUNT_VARIANT
 except ImportError:
-    from constants import TOOL_OFFSET_EE_M, CAM_TILT_EE_DEG, P_TIP_CAM_M
+    from constants import TOOL_OFFSET_EE_M, CAM_TILT_EE_DEG, P_TIP_CAM_M, CAM_MOUNT_VARIANT
 
 
 # ---------------------------------------------------------------------------
@@ -91,55 +91,80 @@ except ImportError:
 TOOL_OFFSET_EE: np.ndarray = np.array(TOOL_OFFSET_EE_M)
 
 
-def make_R_cam_ee(tilt_deg: float = CAM_TILT_EE_DEG) -> np.ndarray:
+def make_R_cam_ee(
+    tilt_deg: float = CAM_TILT_EE_DEG,
+    variant: str = CAM_MOUNT_VARIANT,
+) -> np.ndarray:
     """
     Build R_cam_ee for the SO-101 wrist camera.
 
     R_cam_ee transforms vectors from the EE (Fixed_Jaw) frame to the camera
     frame (OpenCV convention: X-right, Y-down, Z-forward/optical-axis).
 
-    Physical setup (SO-101, confirmed from MuJoCo sim RGB=XYZ axes):
-      - EE frame at zero config:  +X = forward (probe), +Y = up, +Z = right
-        (from the kinematic diagram: red=X along probe, green=Y up, blue=Z right)
-      - Camera is mounted on top of the EE wrist, looking roughly along +EE X
-        (forward / probe direction) and tilted ``tilt_deg`` degrees downward
-        toward the tool tip (from EE +X toward EE -Y, i.e., downward).
+    EE frame axes at home config (confirmed from URDF kinematic chain):
+      +X = forward (probe direction)
+      +Y = lateral (left when facing forward)
+      +Z = downward
 
-    Construction:
-      1. Base alignment (no tilt): camera axes vs EE axes when the camera
-         optical axis is exactly aligned with EE +X:
-           cam +Z (forward)  = EE +X (forward / probe direction)
-           cam +Y (down)     = -EE +Y  (camera "down" = world down = -EE_Y)
-           cam +X (right)    = EE +Z   (right-hand rule: EE_Z × (-EE_Y) = EE_X ✓)
-         This gives R_base = [[ 0,  0,  1],
-                              [ 0, -1,  0],
-                              [ 1,  0,  0]]
+    Three mount variants are supported (select via CAM_MOUNT_VARIANT in constants.py):
 
-      2. Apply a pitch of ``tilt_deg`` around the *camera* X-axis (= EE +Z).
-         Positive tilt rotates cam +Z toward cam +Y, i.e., tilts the optical
-         axis downward from EE +X toward EE -Y (toward the tool / workspace):
-           R_tilt = Rx(tilt_deg)
+    "forward" (legacy)
+      Camera optical axis roughly along EE +X.
+      R_base: cam+X=EE+Y, cam+Y=EE+Z, cam+Z=EE+X
+      Tilt: Rx(+tilt_deg)
 
-      3. Final: R_cam_ee = R_tilt @ R_base
+    "down_a"
+      Camera looks DOWN (optical axis ≈ EE -Y at zero tilt).
+      Sensor oriented so:  cam+X = EE+Z  (image right = EE right),
+                           cam+Y = EE+X  (image down  = EE forward),
+                           cam+Z = EE-Y  (optical axis = EE down)
+      Tilt Rx(+tilt_deg) pitches optical axis from EE -Y toward EE +X.
+
+    "down_b"
+      Camera looks DOWN, sensor rotated 180° on bracket relative to down_a.
+      cam+X = EE-Z  (image right = EE left),
+      cam+Y = EE-X  (image down  = EE backward),
+      cam+Z = EE-Y  (same optical axis)
+      Tilt Rx(-tilt_deg) pitches optical axis from EE -Y toward EE +X.
 
     Returns a 3×3 rotation matrix (proper, det=+1).
     """
-    # Base alignment: map EE frame to camera frame (no tilt)
-    #   cam_X = +ee_Z,  cam_Y = -ee_Y,  cam_Z = +ee_X
-    #   Right-hand check: ee_Z x (-ee_Y) = ee_X  <=>  cam_X x cam_Y = cam_Z  ✓
-    R_base = np.array(
-        [
-            [0, 0, 1],
-            [0, -1, 0],
-            [1, 0, 0],
-        ],
-        dtype=float,
-    )
+    if variant == "down_a":
+        # cam+X = EE+Z, cam+Y = EE+X, cam+Z = EE-Y
+        R_base = np.array(
+            [
+                [0, 0, 1],
+                [1, 0, 0],
+                [0, -1, 0],
+            ],
+            dtype=float,
+        )
+        alpha = np.deg2rad(tilt_deg)
+    elif variant == "down_b":
+        # cam+X = EE-Z, cam+Y = EE-X, cam+Z = EE-Y; sensor 180° rotated on bracket
+        R_base = np.array(
+            [
+                [0, 0, -1],
+                [-1, 0, 0],
+                [0, -1, 0],
+            ],
+            dtype=float,
+        )
+        alpha = np.deg2rad(-tilt_deg)
+    else:
+        # "forward" — legacy assumption: camera looks along EE +X
+        # cam+X = EE+Y, cam+Y = EE+Z, cam+Z = EE+X
+        R_base = np.array(
+            [
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 0, 0],
+            ],
+            dtype=float,
+        )
+        alpha = np.deg2rad(tilt_deg)
 
-    # Pitch around camera X-axis by tilt_deg.
-    # Positive tilt_deg rotates optical axis from EE +X toward EE -Y (downward).
-    # Default +35° means the camera looks past the probe tip toward the workspace.
-    alpha = np.deg2rad(tilt_deg)
+    # Pitch around camera X-axis by alpha.
     R_tilt = np.array(
         [
             [1, 0, 0],
@@ -153,7 +178,7 @@ def make_R_cam_ee(tilt_deg: float = CAM_TILT_EE_DEG) -> np.ndarray:
 
 
 #: Default camera-in-EE rotation for the SO-101 wrist camera
-R_CAM_EE_DEFAULT: np.ndarray = make_R_cam_ee(CAM_TILT_EE_DEG)
+R_CAM_EE_DEFAULT: np.ndarray = make_R_cam_ee(CAM_TILT_EE_DEG, CAM_MOUNT_VARIANT)
 
 #: Fixed vector from camera origin to tooltip, expressed in camera frame (metres).
 #: Constant because both camera and tool are rigidly attached to the EE.

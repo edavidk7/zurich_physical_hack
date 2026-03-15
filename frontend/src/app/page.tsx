@@ -1198,8 +1198,9 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
   // ── Pipeline succeeded — show full telemetry ──
   if (stepResult) {
     const r = stepResult;
-    const ikErrorMm = r.ik_error_m * 1000;
-    const distCm = r.distance_m * 100;
+    const hasArmData = r.status === "pending_confirmation";
+    const ikErrorMm = (r.ik_error_m ?? 0) * 1000;
+    const distCm = (r.distance_m ?? 0) * 100;
 
     return (
       <div className="animate-slide-up space-y-5">
@@ -1214,8 +1215,16 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
           </div>
         </div>
 
+        {/* ── Keypoints-only notice (arm not connected) ── */}
+        {!hasArmData && (
+          <div className="flex items-center gap-2 p-3 rounded-lg border border-blue-200 bg-blue-50 text-sm text-blue-700">
+            <Unplug size={14} className="flex-shrink-0" />
+            Arm not connected — showing keypoints and localisation only.
+          </div>
+        )}
+
         {/* ── Confirm / Cancel bar ── */}
-        {!confirmResult && !cancelled && (
+        {!confirmResult && !cancelled && hasArmData && (
           <div className="flex items-center gap-3 p-4 rounded-xl border-2 border-amber-300 bg-amber-50">
             <AlertTriangle size={20} className="text-amber-500 flex-shrink-0" />
             <div className="flex-1">
@@ -1273,11 +1282,11 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
         )}
 
         {/* ── 3D Simulator: current pose + target marker + ghost target pose ── */}
-        {(() => {
+        {hasArmData && (() => {
           const executed = !!confirmResult?.final_positions_deg;
           const simJoints = executed
-            ? JOINT_ORDER.map(j => confirmResult.final_positions_deg?.[j] ?? r.q_target_deg[j] ?? 0)
-            : JOINT_ORDER.map(j => r.q_current_deg[j] ?? 0);
+            ? JOINT_ORDER.map(j => confirmResult.final_positions_deg?.[j] ?? r.q_target_deg?.[j] ?? 0)
+            : JOINT_ORDER.map(j => r.q_current_deg?.[j] ?? 0);
           return (
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               <div className="p-3 border-b border-gray-100 flex items-center justify-between">
@@ -1295,7 +1304,7 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               </div>
               <ArmSimulator
                 joints={simJoints}
-                targetJoints={executed ? undefined : JOINT_ORDER.map(j => r.q_target_deg[j] ?? 0)}
+                targetJoints={executed ? undefined : JOINT_ORDER.map(j => r.q_target_deg?.[j] ?? 0)}
                 targetPosition={r.target_robot_m}
                 currentTipPosition={executed ? undefined : r.current_tip_m}
                 showTargetLine={!executed}
@@ -1306,17 +1315,21 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
         })()}
 
         {/* ── Top-level metrics ── */}
-        <div className="grid grid-cols-5 gap-2">
-          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider">Distance</div>
-            <div className="text-sm font-bold text-teal-700 font-mono">{distCm.toFixed(1)} cm</div>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider">IK Error</div>
-            <div className={`text-sm font-bold font-mono ${ikErrorMm < 1 ? "text-emerald-600" : ikErrorMm < 5 ? "text-amber-600" : "text-red-600"}`}>
-              {ikErrorMm.toFixed(3)} mm
+        <div className={`grid gap-2 ${hasArmData ? "grid-cols-5" : "grid-cols-2"}`}>
+          {hasArmData && (
+            <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider">Distance</div>
+              <div className="text-sm font-bold text-teal-700 font-mono">{distCm.toFixed(1)} cm</div>
             </div>
-          </div>
+          )}
+          {hasArmData && (
+            <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider">IK Error</div>
+              <div className={`text-sm font-bold font-mono ${ikErrorMm < 1 ? "text-emerald-600" : ikErrorMm < 5 ? "text-amber-600" : "text-red-600"}`}>
+                {ikErrorMm.toFixed(3)} mm
+              </div>
+            </div>
+          )}
           <div className="bg-gray-50 rounded-lg p-2.5 text-center">
             <div className="text-[10px] text-gray-400 uppercase tracking-wider">ArUco Markers</div>
             <div className="text-sm font-bold text-teal-700 font-mono">{r.n_markers}</div>
@@ -1327,10 +1340,12 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               {r.reprojection_err_px.toFixed(2)} px
             </div>
           </div>
-          <div className="bg-gray-50 rounded-lg p-2.5 text-center">
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider">Waypoints</div>
-            <div className="text-sm font-bold text-teal-700 font-mono">{r.motion_steps}</div>
-          </div>
+          {hasArmData && (
+            <div className="bg-gray-50 rounded-lg p-2.5 text-center">
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider">Waypoints</div>
+              <div className="text-sm font-bold text-teal-700 font-mono">{r.motion_steps}</div>
+            </div>
+          )}
         </div>
 
         {/* ── Annotated Camera Frame ── */}
@@ -1418,7 +1433,8 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
           </div>
         </details>
 
-        {/* ── Camera → Robot Transform ── */}
+        {/* ── Camera → Robot Transform (arm required) ── */}
+        {hasArmData && r.target_robot_m && r.current_tip_m && r.delta_m && (
         <details open className="group">
           <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
             <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
@@ -1451,9 +1467,10 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
             </div>
           </div>
         </details>
+        )}
 
         {/* ── IK Solution & Joint Comparison ── */}
-        <details open className="group">
+        {hasArmData && <details open className="group">
           <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
             <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
             Inverse Kinematics Solution
@@ -1482,8 +1499,8 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
                 </thead>
                 <tbody>
                   {JOINT_ORDER.filter(j => j !== "gripper").map((joint) => {
-                    const cur = r.q_current_deg[joint] ?? 0;
-                    const tgt = r.q_target_deg[joint] ?? 0;
+                    const cur = r.q_current_deg?.[joint] ?? 0;
+                    const tgt = r.q_target_deg?.[joint] ?? 0;
                     const delta = tgt - cur;
                     return (
                       <tr key={joint} className="border-b border-gray-50 last:border-0">
@@ -1502,10 +1519,10 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               </table>
             </div>
           </div>
-        </details>
+        </details>}
 
         {/* ── Trajectory Summary ── */}
-        <details className="group">
+        {hasArmData && <details className="group">
           <summary className="cursor-pointer text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1 mb-2">
             <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
             Trajectory ({r.motion_steps} waypoints, cosine interpolation)
@@ -1515,13 +1532,13 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               <div>
                 <span className="text-gray-400">Start:</span>{" "}
                 <span className="font-mono text-gray-600">
-                  [{JOINT_ORDER.filter(j => j !== "gripper").map(j => (r.q_current_deg[j] ?? 0).toFixed(1)).join(", ")}]°
+                  [{JOINT_ORDER.filter(j => j !== "gripper").map(j => (r.q_current_deg?.[j] ?? 0).toFixed(1)).join(", ")}]°
                 </span>
               </div>
               <div>
                 <span className="text-gray-400">End:</span>{" "}
                 <span className="font-mono text-gray-600">
-                  [{JOINT_ORDER.filter(j => j !== "gripper").map(j => (r.q_target_deg[j] ?? 0).toFixed(1)).join(", ")}]°
+                  [{JOINT_ORDER.filter(j => j !== "gripper").map(j => (r.q_target_deg?.[j] ?? 0).toFixed(1)).join(", ")}]°
                 </span>
               </div>
             </div>
@@ -1550,7 +1567,7 @@ function KeypointsTab({ result }: { result: ExecuteResult | null }) {
               })}
             </div>
           </div>
-        </details>
+        </details>}
       </div>
     );
   }

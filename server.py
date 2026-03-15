@@ -1552,7 +1552,22 @@ async def run_step(req: RunStepRequest):
     # ── 7. Read current joint angles, compute cam→robot transform ────────
     ctrl = get_motor_controller()
     if not ctrl.is_connected:
-        raise HTTPException(400, "Robot not connected. Call /api/motor/connect first.")
+        # Arm not attached — return keypoints + localisation only, skip IK/motion.
+        return {
+            "status": "keypoints_only",
+            "annotated_image": img_b64,
+            "keypoints": keypoints,
+            "prompt": prompt,
+            "target_keypoint": target_kp,
+            "probe_keypoint": probe_kp,
+            "pixel_uv": [round(pixel_u, 1), round(pixel_v, 1)],
+            "pos_cam_m": pos_cam_m.tolist(),
+            "pos_board_m": [float(x) for x in pos_board_m],
+            "depth_m": round(depth_m, 5),
+            "n_markers": n_markers,
+            "reprojection_err_px": round(reproj_err, 2),
+            "camera_size": [cam_w, cam_h],
+        }
 
     motor_result = await asyncio.get_event_loop().run_in_executor(
         None, ctrl.read_positions
@@ -1573,11 +1588,6 @@ async def run_step(req: RunStepRequest):
 
     solver = get_ik_solver()
     T_robot_cam = compute_T_robot_cam(q_current_urdf, solver)
-    # The camera sensor is horizontally mirrored relative to the robot coordinate
-    # frame (physical right appears as image left). This is a reflection — it cannot
-    # be expressed in R_cam_ee without breaking the rotation matrix (det=-1), so it
-    # must be corrected here by negating the camera X component before transforming.
-    pos_cam_m[0] = -pos_cam_m[0]
     target_robot = cam_to_robot(pos_cam_m, T_robot_cam)
 
     # Safety clearance: lift target above the workspace so the tool doesn't collide

@@ -166,7 +166,7 @@ export interface KeypointResponse {
 // ---------------------------------------------------------------------------
 
 export interface RunStepResponse {
-  status: "pending_confirmation";
+  status: "pending_confirmation" | "keypoints_only";
   annotated_image: string;
   keypoints: { label: string; point: [number, number] }[];
   prompt: string;
@@ -176,14 +176,15 @@ export interface RunStepResponse {
   pos_cam_m: [number, number, number];
   pos_board_m: [number, number, number];
   depth_m: number;
-  target_robot_m: [number, number, number];
-  current_tip_m: [number, number, number];
-  delta_m: [number, number, number];
-  distance_m: number;
-  q_current_deg: Record<string, number>;
-  q_target_deg: Record<string, number>;
-  ik_error_m: number;
-  motion_steps: number;
+  // Arm-specific fields — absent when status === "keypoints_only"
+  target_robot_m?: [number, number, number];
+  current_tip_m?: [number, number, number];
+  delta_m?: [number, number, number];
+  distance_m?: number;
+  q_current_deg?: Record<string, number>;
+  q_target_deg?: Record<string, number>;
+  ik_error_m?: number;
+  motion_steps?: number;
   n_markers: number;
   reprojection_err_px: number;
   camera_size: [number, number];

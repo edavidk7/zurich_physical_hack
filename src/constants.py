@@ -18,10 +18,28 @@ TOOL_OFFSET_EE_M: list[float] = [0.059, 0.0, 0.0]
 
 # ── Camera mount ──────────────────────────────────────────────────────────────
 
-# Camera tilt applied as Rx(tilt_deg) in the camera frame, which rotates the
-# optical axis (cam +Z = EE +X at zero tilt) toward cam +Y (= EE +Z).
-# Positive = tilts optical axis downward toward the workspace (EE +Z direction).
-# Physical mount tilt is +35° (camera looks past the probe tip toward the board).
+# Camera mount variant — selects the base R_cam_ee before the tilt is applied.
+#
+#   "forward"  (old assumption) — cam +Z along EE +X, camera looks forward.
+#              cam +X = EE +Z, cam +Y = EE +Z (→ -EE Y via tilt)
+#
+#   "down_a"   Camera looks DOWN, sensor not flipped:
+#              cam +X = EE +Z  (EE right   → image right)
+#              cam +Y = EE +X  (EE forward → image down)
+#              cam +Z = EE -Y  (optical axis = EE down)
+#              Tilt Rx(+35°) pitches optical axis from EE -Y toward EE +X.
+#
+#   "down_b"   Camera looks DOWN, sensor rotated 180° on bracket:
+#              cam +X = EE -Z  (EE left    → image right)
+#              cam +Y = EE -X  (EE back    → image down)
+#              cam +Z = EE -Y  (same optical axis)
+#              Tilt Rx(-35°) pitches optical axis from EE -Y toward EE +X.
+#
+# Start with "down_a".  If image X is mirrored relative to robot motion, switch to "down_b".
+CAM_MOUNT_VARIANT: str = "down_b"
+
+# Camera tilt: angle (degrees) that pitches the optical axis from straight-down
+# toward the forward (+X_EE) direction.  Physical mount = 35°.
 CAM_TILT_EE_DEG: float = 35.0
 
 # Tooltip position measured in the camera frame (metres).

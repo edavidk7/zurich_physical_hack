@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SO-100 Arm Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    #panel {
+      width: 250px;
+      min-width: 250px;
+      background: #161b22;
+      border-right: 1px solid #21262d;
+      padding: 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      overflow-y: auto;
+    }
+    #panel h1 { font-size: 13px; color: #58a6ff; letter-spacing: 0.04em; }
+    #panel .sub { font-size: 10px; color: #484f58; margin-top: 2px; margin-bottom: 18px; }
+
+    .section-label {
+      font-size: 10px;
+      color: #484f58;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 10px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid #21262d;
+    }
+
+    .joint { margin-bottom: 14px; }
+    .joint-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 3px;
+    }
+    .joint-name { font-size: 11px; color: #8b949e; }
+    .joint-val  { font-size: 11px; color: #58a6ff; font-weight: bold; min-width: 90px; text-align: right; }
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 3px;
+      background: #21262d;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: #58a6ff;
+      cursor: pointer;
+    }
+    input[type=range]::-moz-range-thumb {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: #58a6ff;
+      border: none;
+      cursor: pointer;
+    }
+    .joint-limits {
+      display: flex;
+      justify-content: space-between;
+      font-size: 9px;
+      color: #30363d;
+      margin-top: 2px;
+    }
+
+    #reset-btn {
+      margin-top: 6px;
+      padding: 6px 0;
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      color: #8b949e;
+      font-family: inherit;
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    #reset-btn:hover { background: #30363d; color: #c9d1d9; }
+
+    /* ── EE position card ── */
+    #ee-card {
+      margin-top: 18px;
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    #ee-card .ee-label { font-size: 10px; color: #484f58; margin-bottom: 6px; }
+    #ee-card .ee-row   { font-size: 11px; color: #8b949e; line-height: 1.8; }
+    #ee-card .ee-row span { color: #58a6ff; }
+
+    /* ── Canvas ── */
+    #canvas-container { flex: 1; position: relative; overflow: hidden; }
+    #canvas-container canvas { display: block; }
+
+    #hint {
+      position: absolute;
+      bottom: 10px;
+      right: 12px;
+      font-size: 10px;
+      color: #30363d;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="panel">
+  <h1>SO-100 Arm Viewer</h1>
+  <div class="sub">three.js · drag to orbit · scroll to zoom</div>
+
+  <div class="section-label">Joints (radians)</div>
+
+  <!-- sliders rendered by JS -->
+  <div id="sliders"></div>
+
+  <button id="reset-btn">Reset to zero</button>
+
+  <div id="ee-card">
+    <div class="ee-label">EE position (mm)</div>
+    <div class="ee-row">X = <span id="ee-x">—</span></div>
+    <div class="ee-row">Y = <span id="ee-y">—</span></div>
+    <div class="ee-row">Z = <span id="ee-z">—</span></div>
+  </div>
+</div>
+
+<div id="canvas-container"></div>
+<div id="hint">LMB orbit · RMB pan · wheel zoom</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { STLLoader }     from 'three/addons/loaders/STLLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scene
+// ─────────────────────────────────────────────────────────────────────────────
+
+const container = document.getElementById('canvas-container');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+scene.fog = new THREE.FogExp2(0x0d1117, 1.8);
+
+const camera = new THREE.PerspectiveCamera(42, container.clientWidth / container.clientHeight, 0.001, 10);
+camera.position.set(0.38, 0.28, 0.35);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.12, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.minDistance = 0.05;
+controls.maxDistance = 1.5;
+controls.update();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lighting
+// ─────────────────────────────────────────────────────────────────────────────
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+
+const key = new THREE.DirectionalLight(0xffffff, 1.8);
+key.position.set(0.8, 1.5, 1.2);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 0.1;
+key.shadow.camera.far  = 4;
+key.shadow.camera.left = key.shadow.camera.bottom = -0.4;
+key.shadow.camera.right = key.shadow.camera.top   =  0.4;
+key.shadow.bias = -0.001;
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0x5588cc, 0.5);
+fill.position.set(-1, 0.5, -0.8);
+scene.add(fill);
+
+const rim = new THREE.PointLight(0x37e0d8, 0.6, 0.6);
+rim.position.set(0, 0.35, 0);
+scene.add(rim);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ground
+// ─────────────────────────────────────────────────────────────────────────────
+
+const grid = new THREE.GridHelper(1, 50, 0x1a3040, 0x151f28);
+scene.add(grid);
+
+const shadow = new THREE.Mesh(
+  new THREE.CircleGeometry(0.4, 64),
+  new THREE.MeshStandardMaterial({ color: 0x0a0e14, roughness: 1 })
+);
+shadow.rotation.x = -Math.PI / 2;
+shadow.position.y = 0.0001;
+scene.add(shadow);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Materials
+// ─────────────────────────────────────────────────────────────────────────────
+
+const matPlastic = new THREE.MeshStandardMaterial({
+  color: 0x14b8a6,   // teal / 3d-printed
+  metalness: 0.05,
+  roughness: 0.65,
+});
+const matMotor = new THREE.MeshStandardMaterial({
+  color: 0x252b33,
+  metalness: 0.55,
+  roughness: 0.45,
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kinematic chain — joints from so100.urdf
+// ─────────────────────────────────────────────────────────────────────────────
+
+const JOINTS = [
+  // name           origin xyz                  origin rpy              axis      lower       upper
+  { name: 'shoulder_pan',  xyz: [ 0,     -0.0452,  0.0165], rpy: [ 1.57079, 0,       0      ], axis: [0,1,0], lower: -2,       upper:  2       },
+  { name: 'shoulder_lift', xyz: [ 0,      0.1025,  0.0306], rpy: [-1.8,     0,       0      ], axis: [1,0,0], lower:  0,       upper:  3.5     },
+  { name: 'elbow_flex',    xyz: [ 0,      0.11257, 0.028 ], rpy: [ 1.57079, 0,       0      ], axis: [1,0,0], lower: -3.14158, upper:  0       },
+  { name: 'wrist_flex',    xyz: [ 0,      0.0052,  0.1349], rpy: [-1,       0,       0      ], axis: [1,0,0], lower: -2.5,     upper:  1.2     },
+  { name: 'wrist_roll',    xyz: [ 0,     -0.0601,  0     ], rpy: [ 0,       1.57079, 0      ], axis: [0,1,0], lower: -3.14158, upper:  3.14158 },
+  { name: 'gripper',       xyz: [-0.0202,-0.0244,  0     ], rpy: [ 0,       3.14158, 0      ], axis: [0,0,1], lower: -0.2,     upper:  2.0     },
+];
+
+// STL mesh pairs per link (index = link index: base=0 … jaw=6)
+const MESHES = [
+  { plastic: 'Base.stl',             motor: 'Base_Motor.stl'             },
+  { plastic: 'Rotation_Pitch.stl',   motor: 'Rotation_Pitch_Motor.stl'   },
+  { plastic: 'Upper_Arm.stl',        motor: 'Upper_Arm_Motor.stl'        },
+  { plastic: 'Lower_Arm.stl',        motor: 'Lower_Arm_Motor.stl'        },
+  { plastic: 'Wrist_Pitch_Roll.stl', motor: 'Wrist_Pitch_Roll_Motor.stl' },
+  { plastic: 'Fixed_Jaw.stl',        motor: 'Fixed_Jaw_Motor.stl'        },
+  { plastic: 'Moving_Jaw.stl',       motor: null                          },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Build the group hierarchy
+// ─────────────────────────────────────────────────────────────────────────────
+
+// URDF is Z-up; rotate root -90° around X to get Three.js Y-up.
+const rootGroup = new THREE.Group();
+rootGroup.rotation.x = -Math.PI / 2;
+scene.add(rootGroup);
+
+// jointRotGroups[i] = { group, axis } — set quaternion here to change joint angle
+const jointRotGroups = [];
+
+// linkGroups[i] = the Three.js Group whose local origin IS the i-th link frame
+const linkGroups = [rootGroup];  // link 0 (base) = rootGroup
+
+let parent = rootGroup;
+for (const j of JOINTS) {
+  // Static origin transform: translation + RPY rotation (URDF XYZ Euler order)
+  const originGrp = new THREE.Group();
+  originGrp.position.set(...j.xyz);
+  originGrp.rotation.set(j.rpy[0], j.rpy[1], j.rpy[2]);  // Three.js default = XYZ = URDF RPY
+  parent.add(originGrp);
+
+  // Dynamic joint rotation around axis
+  const rotGrp = new THREE.Group();
+  originGrp.add(rotGrp);
+
+  jointRotGroups.push({ group: rotGrp, axis: new THREE.Vector3(...j.axis) });
+  linkGroups.push(rotGrp);
+  parent = rotGrp;
+}
+
+// Invisible EE marker (at jaw link frame origin) for position readout
+const eeMarker = new THREE.Object3D();
+linkGroups[6].add(eeMarker);
+
+// Small axes helper at EE
+const axesHelper = new THREE.AxesHelper(0.025);
+linkGroups[5].add(axesHelper);  // Fixed_Jaw frame
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load STL meshes
+// ─────────────────────────────────────────────────────────────────────────────
+
+const stlLoader = new STLLoader();
+
+function loadSTL(filename, mat, group) {
+  if (!filename) return;
+  stlLoader.load(
+    '/robot/assets/' + filename,
+    (geo) => {
+      geo.computeVertexNormals();
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    },
+    undefined,
+    () => console.warn('[viewer] could not load', filename)
+  );
+}
+
+MESHES.forEach(({ plastic, motor }, i) => {
+  loadSTL(plastic, matPlastic, linkGroups[i]);
+  loadSTL(motor,   matMotor,   linkGroups[i]);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Joint state + sliders
+// ─────────────────────────────────────────────────────────────────────────────
+
+const values = JOINTS.map(() => 0);
+
+function applyJoints() {
+  for (let i = 0; i < JOINTS.length; i++) {
+    const { group, axis } = jointRotGroups[i];
+    group.quaternion.setFromAxisAngle(axis, values[i]);
+  }
+}
+applyJoints();
+
+const slidersDiv = document.getElementById('sliders');
+const valSpans   = [];
+
+JOINTS.forEach((j, i) => {
+  const loStr = (j.lower * 180 / Math.PI).toFixed(0) + '°';
+  const hiStr = (j.upper * 180 / Math.PI).toFixed(0) + '°';
+
+  const div = document.createElement('div');
+  div.className = 'joint';
+  div.innerHTML = `
+    <div class="joint-header">
+      <span class="joint-name">${j.name}</span>
+      <span class="joint-val" id="v${i}">0.00 rad</span>
+    </div>
+    <input type="range" id="s${i}"
+      min="${j.lower}" max="${j.upper}" step="0.005" value="0"/>
+    <div class="joint-limits"><span>${loStr}</span><span>${hiStr}</span></div>`;
+  slidersDiv.appendChild(div);
+
+  valSpans.push(document.getElementById(`v${i}`));
+
+  document.getElementById(`s${i}`).addEventListener('input', e => {
+    const v = parseFloat(e.target.value);
+    values[i] = v;
+    valSpans[i].textContent = `${v.toFixed(2)} (${(v * 180 / Math.PI).toFixed(1)}°)`;
+    applyJoints();
+  });
+});
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  for (let i = 0; i < JOINTS.length; i++) {
+    values[i] = 0;
+    document.getElementById(`s${i}`).value = 0;
+    valSpans[i].textContent = '0.00 rad';
+  }
+  applyJoints();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EE position display
+// ─────────────────────────────────────────────────────────────────────────────
+
+const eeWorld = new THREE.Vector3();
+const eeXEl = document.getElementById('ee-x');
+const eeYEl = document.getElementById('ee-y');
+const eeZEl = document.getElementById('ee-z');
+
+function updateEE() {
+  eeMarker.getWorldPosition(eeWorld);
+  // Convert back to URDF frame (undo the root -90° X rotation): Y↔Z swap
+  // root rotates URDF-Z-up → Three.js-Y-up, so robot_x=scene_x, robot_y=-scene_z, robot_z=scene_y
+  const rx = eeWorld.x * 1000;
+  const ry = -eeWorld.z * 1000;
+  const rz = eeWorld.y * 1000;
+  eeXEl.textContent = rx.toFixed(1);
+  eeYEl.textContent = ry.toFixed(1);
+  eeZEl.textContent = rz.toFixed(1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resize handling
+// ─────────────────────────────────────────────────────────────────────────────
+
+new ResizeObserver(() => {
+  const w = container.clientWidth, h = container.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}).observe(container);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Render loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  updateEE();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

@@ -32,9 +32,15 @@ from google.genai import types
 KEYPOINT_COLORS = ["#00ff00", "#ff00ff", "#00ffff", "#ffff00", "#ff8800"]
 
 
-def parse_json_response(raw_text: str) -> list[dict]:
+def parse_json_response(raw_text: str | None) -> list[dict]:
     """strip markdown fences and parse json from model output."""
+    if not raw_text or not raw_text.strip():
+        print(f"[parse_json_response] WARNING: empty or None response text: {repr(raw_text)}")
+        return []
     cleaned = re.sub(r"^```\w*\n?|```$", "", raw_text.strip()).strip()
+    if not cleaned:
+        print(f"[parse_json_response] WARNING: cleaned response is empty, raw: {repr(raw_text)}")
+        return []
     data = json.loads(cleaned)
     if not isinstance(data, list):
         data = [data]
@@ -115,7 +121,9 @@ def extract_keypoints(
         ),
     )
 
-    return parse_json_response(response.text.strip())
+    finish_reason = response.candidates[0].finish_reason if response.candidates else "NO_CANDIDATES"
+    print(f"[extract_keypoints] model={model} finish_reason={finish_reason} text={repr(response.text)}")
+    return parse_json_response(response.text)
 
 
 def annotate_image_pil(image: Image.Image, keypoints: list[dict]) -> Image.Image:
